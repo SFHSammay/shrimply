@@ -11,6 +11,9 @@ namespace shrimply {
 
 std::unique_ptr<QGuiApplication> new_widget_application()
 {
+#ifdef Q_OS_WIN
+  qputenv("QT_QUICK_CONTROLS_STYLE", "Fusion");
+#endif
   QVector<QByteArray> arguments{ QByteArrayLiteral("shrimply") };
   auto *argument_data = new rust::cxxqtlib1::ApplicationArgsData(arguments);
   auto application = std::make_unique<QApplication>(argument_data->size(),

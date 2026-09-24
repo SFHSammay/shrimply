@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod external;
 pub mod sys;
 

@@ -571,7 +571,17 @@ impl GpuMemoryManager {
                 "allocate {description} as managed memory: {result:?}"
             ));
         }
-        let buffer = unsafe { DeviceBuffer::from_raw_parts(ptr, length, stream.context().clone()) };
+        let mut buffer = unsafe { DeviceBuffer::from_raw_parts(ptr, length, stream.context().clone()) };
+        #[cfg(target_os = "windows")]
+        {
+            buffer
+                .zero_async(stream)
+                .map_err(|error| format!("zero {description} managed memory: {error}"))?;
+            stream
+                .synchronize()
+                .map_err(|error| format!("finish zeroing {description} managed memory: {error}"))?;
+        }
+        #[cfg(not(target_os = "windows"))]
         unsafe { std::ptr::write_bytes(ptr as *mut u8, 0, bytes as usize) };
         let ptr = buffer.cu_deviceptr();
         let location = if prefer_host {
@@ -991,6 +1001,7 @@ pub fn configure(host_budget_bytes: u64) {
     global().configure(host_budget_bytes);
 }
 
+#[cfg(unix)]
 pub fn physical_system_memory_bytes() -> u64 {
     let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
     let page_bytes = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -1001,6 +1012,23 @@ pub fn physical_system_memory_bytes() -> u64 {
     pages
         .checked_mul(page_bytes)
         .expect("detect physical system RAM: byte count overflowed")
+}
+
+#[cfg(target_os = "windows")]
+pub fn physical_system_memory_bytes() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{
+        GlobalMemoryStatusEx, MEMORYSTATUSEX,
+    };
+
+    let mut status = MEMORYSTATUSEX::default();
+    status.dwLength = u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>())
+        .expect("detect physical system RAM: MEMORYSTATUSEX size exceeds u32");
+    let result = unsafe { GlobalMemoryStatusEx(&mut status) };
+    assert!(
+        result != 0,
+        "detect physical system RAM: GlobalMemoryStatusEx failed"
+    );
+    status.ullTotalPhys
 }
 
 pub fn default_host_budget_bytes() -> u64 {

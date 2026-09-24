@@ -1,6 +1,11 @@
 RUSTUP ?= rustup
 RUST_TOOLCHAIN ?= nightly-2026-04-03
+ifeq ($(OS),Windows_NT)
+HOST_OS := Windows_NT
+else
 HOST_OS := $(shell uname -s)
+endif
+HOST_IS_WINDOWS := $(if $(filter Windows_NT,$(OS)),1,$(if $(filter MINGW% MSYS% CYGWIN%,$(HOST_OS)),1,))
 CARGO ?= $(RUSTUP) run $(RUST_TOOLCHAIN) cargo
 RUSTC ?= $(RUSTUP) run $(RUST_TOOLCHAIN) rustc
 CARGO_TARGET_DIR ?= target
@@ -119,16 +124,21 @@ FEDORA_PACKAGES := \
 	qt6-qtbase-devel \
 	qt6-qtdeclarative-devel
 
-.PHONY: native-deps qt-native-deps qt-desktop-file desktop-icon cuda-target-check cuda-artifacts dev dev-mac qt-build dev-qt dev-server docs docs-check run run-qt build release check components-check gtk-components-showcase qt-components-showcase server-python-check manim manim-python-check manim-parameter-check cargo-check fmt fmt-check lint test frame-rate-test video-lifecycle-test transparent-fill-frame-range-test transparent-fill-decoder-test transparent-fill-kernel-test transparent-fill-compositor-test transparent-fill-playback-test transparent-fill-e2e-fixture transparent-fill-e2e-test decode-ahead-benchmark paint-interpolation-test crash-report clean deps-fedora deps-fedora-qt qt-release install install-qt install-codex-mcp-dev install-agy-mcp-dev uninstall uninstall-qt flatpak-gtk
+.PHONY: native-deps qt-native-deps qt-desktop-file desktop-icon cuda-target-check cuda-artifacts dev dev-mac qt-build dev-qt dev-window dev-server docs docs-check run run-qt build release check components-check gtk-components-showcase qt-components-showcase server-python-check manim manim-python-check manim-parameter-check cargo-check fmt fmt-check lint test frame-rate-test video-lifecycle-test transparent-fill-frame-range-test transparent-fill-decoder-test transparent-fill-kernel-test transparent-fill-compositor-test transparent-fill-playback-test transparent-fill-e2e-fixture transparent-fill-e2e-test decode-ahead-benchmark paint-interpolation-test crash-report clean deps-fedora deps-fedora-qt qt-release install install-qt install-codex-mcp-dev install-agy-mcp-dev uninstall uninstall-qt flatpak-gtk
 native-deps:
 	@$(PKG_CONFIG) --exists rubberband || { echo "Missing Rubber Band development files (pkg-config: rubberband)" >&2; exit 1; }
 	@$(PKG_CONFIG) --exists libpipewire-0.3 || { echo "Missing PipeWire development files (pkg-config: libpipewire-0.3)" >&2; exit 1; }
 	@$(PKG_CONFIG) --exists poppler-glib || { echo "Missing Poppler GLib development files (pkg-config: poppler-glib)" >&2; exit 1; }
 
+ifeq ($(HOST_IS_WINDOWS),1)
+qt-native-deps:
+	@powershell -NoProfile -Command "if (-not (Get-Command '$(QT_QMAKE)' -ErrorAction SilentlyContinue)) { [Console]::Error.WriteLine('Missing Qt 6 qmake ($(QT_QMAKE))'); exit 1 }; $$version = & '$(QT_QMAKE)' -query QT_VERSION; if ($$version -like '6.*') { Write-Output ('Using Qt ' + $$version + ' via $(QT_QMAKE)') } else { [Console]::Error.WriteLine('$(QT_QMAKE) selected unsupported Qt ' + $$version + '; Qt 6 is required'); exit 1 }"
+else
 qt-native-deps:
 	@command -v $(QT_QMAKE) >/dev/null 2>&1 || { echo "Missing Qt 6 qmake ($(QT_QMAKE))" >&2; exit 1; }
 	@version="$$($(QT_QMAKE) -query QT_VERSION)"; case "$$version" in 6.*) echo "Using Qt $$version via $(QT_QMAKE)" ;; *) echo "$(QT_QMAKE) selected unsupported Qt $$version; Qt 6 is required" >&2; exit 1 ;; esac
 	@$(PKG_CONFIG) --exists Qt6Core Qt6Gui Qt6Qml Qt6Quick Qt6QuickControls2 Qt6OpenGL || { echo "Missing Qt 6 Quick/OpenGL development files" >&2; exit 1; }
+endif
 
 cuda-target-check:
 	@test "$$(uname -s)" = Linux || { echo "CUDA kernels require Linux" >&2; exit 1; }
@@ -196,6 +206,16 @@ dev-mac: appkit-build
 
 qt-build: native-deps qt-native-deps cuda-artifacts
 	$(DEV_BUILD_ENV) QMAKE=$(QT_QMAKE) CARGO_TERM_COLOR=always $(CARGO) build -p $(QT_EDITOR_PACKAGE) -p $(QT_LAUNCHER_PACKAGE) -p $(MCP_PACKAGE) --bins
+
+ifeq ($(HOST_IS_WINDOWS),1)
+dev-window: qt-native-deps
+	set "QMAKE=$(QT_QMAKE)" && set "CARGO_TERM_COLOR=always" && $(CARGO) build -p $(QT_EDITOR_PACKAGE) -p $(QT_LAUNCHER_PACKAGE) -p $(MCP_PACKAGE) --bins
+	set "RUST_LOG=$(RUST_LOG)" && target\debug\$(QT_BIN_NAME).exe
+else
+dev-window:
+	@echo "dev-window requires Windows; current host: $(HOST_OS)" >&2
+	@exit 1
+endif
 
 dev-qt: SHELL := /bin/bash
 qt-desktop-file: desktop-icon

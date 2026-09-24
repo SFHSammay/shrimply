@@ -1,4 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -14,6 +17,10 @@ const SOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SOCKET_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const EDITOR_START_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(unix)]
+const EDITOR_BINARY: &str = "shrimply-editor";
+#[cfg(windows)]
+const EDITOR_BINARY: &str = "shrimply-editor-qt.exe";
 
 #[derive(Debug)]
 pub enum BridgeError {
@@ -31,6 +38,7 @@ impl std::fmt::Display for BridgeError {
 
 impl std::error::Error for BridgeError {}
 
+#[cfg(unix)]
 pub fn socket_path(pid: u32) -> Result<PathBuf, String> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -38,10 +46,30 @@ pub fn socket_path(pid: u32) -> Result<PathBuf, String> {
     Ok(runtime.join("shrimply").join(format!("mcp-{pid}.sock")))
 }
 
+#[cfg(windows)]
+pub fn endpoint_path(pid: u32) -> Result<PathBuf, String> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA is not set".to_string())?;
+    Ok(local_app_data
+        .join("Shrimply")
+        .join("mcp")
+        .join(format!("mcp-{pid}.json")))
+}
+
+#[cfg(windows)]
+#[derive(serde::Deserialize)]
+struct EndpointFile {
+    port: u16,
+}
+
 #[derive(Clone)]
 pub struct Bridge {
     project_path: PathBuf,
+    #[cfg(unix)]
     socket_path: PathBuf,
+    #[cfg(windows)]
+    endpoint: SocketAddr,
 }
 
 impl Bridge {
@@ -70,7 +98,10 @@ impl Bridge {
             })?;
         let bridge = Self {
             project_path,
+            #[cfg(unix)]
             socket_path: socket_path(pid).map_err(BridgeError::Transport)?,
+            #[cfg(windows)]
+            endpoint: read_endpoint(pid).map_err(BridgeError::Transport)?,
         };
         bridge.request_with_cancel_timeout(
             BridgeCommand::Handshake,
@@ -85,10 +116,10 @@ impl Bridge {
         canceled: Arc<AtomicBool>,
     ) -> Result<Self, BridgeError> {
         let sibling = std::env::current_exe()
-            .map(|path| path.with_file_name("shrimply-editor"))
+            .map(|path| path.with_file_name(EDITOR_BINARY))
             .ok()
             .filter(|path| path.is_file());
-        let editor = sibling.unwrap_or_else(|| PathBuf::from("shrimply-editor"));
+        let editor = sibling.unwrap_or_else(|| PathBuf::from(EDITOR_BINARY));
         let mut child = Command::new(&editor)
             .arg(project_path)
             .stdin(Stdio::null())
@@ -170,10 +201,18 @@ impl Bridge {
         canceled: Arc<AtomicBool>,
         response_timeout: Duration,
     ) -> Result<serde_json::Value, BridgeError> {
+        #[cfg(unix)]
         let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
             BridgeError::Transport(format!(
                 "could not connect to the open editor at {}: {error}",
                 self.socket_path.display()
+            ))
+        })?;
+        #[cfg(windows)]
+        let mut stream = TcpStream::connect(self.endpoint).map_err(|error| {
+            BridgeError::Transport(format!(
+                "could not connect to the open editor at {}: {error}",
+                self.endpoint
             ))
         })?;
         stream
@@ -265,6 +304,19 @@ impl Bridge {
             )),
         }
     }
+}
+
+#[cfg(windows)]
+fn read_endpoint(pid: u32) -> Result<SocketAddr, String> {
+    let path = endpoint_path(pid)?;
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read MCP endpoint {}: {error}", path.display()))?;
+    let endpoint: EndpointFile = serde_json::from_str(&contents)
+        .map_err(|error| format!("malformed MCP endpoint {}: {error}", path.display()))?;
+    if endpoint.port == 0 {
+        return Err(format!("MCP endpoint {} has invalid port 0", path.display()));
+    }
+    Ok(SocketAddr::from(([127, 0, 0, 1], endpoint.port)))
 }
 
 fn stop_editor(child: &mut Child) {

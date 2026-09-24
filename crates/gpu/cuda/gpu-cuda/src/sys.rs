@@ -37,8 +37,11 @@ pub const CUDA_ARRAY3D_SURFACE_LDST: u32 = 2;
 pub const CUDA_ARRAY3D_COLOR_ATTACHMENT: u32 = 32;
 pub const CUarray_format_enum_CU_AD_FORMAT_UNSIGNED_INT8: u32 = 1;
 pub const CUexternalMemoryHandleType_enum_CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: u32 = 1;
+pub const CUexternalMemoryHandleType_enum_CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32: u32 = 2;
 pub const CUexternalSemaphoreHandleType_enum_CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD: u32 = 1;
+pub const CUexternalSemaphoreHandleType_enum_CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32: u32 = 2;
 pub const CUexternalSemaphoreHandleType_enum_CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD:u32=9;
+pub const CUexternalSemaphoreHandleType_enum_CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_WIN32:u32=10;
 pub const CUevent_wait_flags_enum_CU_EVENT_WAIT_DEFAULT: u32 = 0;
 pub const CUctx_flags_enum_CU_CTX_SCHED_BLOCKING_SYNC: u32 = 4;
 pub const CUctx_flags_enum_CU_CTX_SCHED_MASK: u32 = 7;
@@ -57,8 +60,16 @@ pub struct CUDA_ARRAY3D_DESCRIPTOR {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct CUDA_EXTERNAL_HANDLE_DESC_WIN32 {
+    pub handle: *mut c_void,
+    pub name: *const c_void,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub union CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 {
     pub fd: i32,
+    pub win32: CUDA_EXTERNAL_HANDLE_DESC_WIN32,
     pub words: [usize; 2],
 }
 #[repr(C)]
@@ -91,6 +102,7 @@ pub struct CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC {
 #[derive(Clone, Copy)]
 pub union CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC_st__bindgen_ty_1 {
     pub fd: i32,
+    pub win32: CUDA_EXTERNAL_HANDLE_DESC_WIN32,
     pub words: [usize; 2],
 }
 #[repr(C)]

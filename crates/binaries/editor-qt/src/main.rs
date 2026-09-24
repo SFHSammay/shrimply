@@ -10,6 +10,7 @@ fn main() -> ExitCode {
     shrimply_components_qt::init();
     shrimply_export_qt::init();
     shrimply_inspector_qt::init();
+    shrimply_preferences_qt::init();
     let mut paths = std::env::args_os().skip(1);
     if paths.next().is_none() || paths.next().is_some() {
         eprintln!(

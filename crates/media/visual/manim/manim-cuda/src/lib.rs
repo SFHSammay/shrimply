@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "windows"))]
 mod vulkan;
 use hashbrown::HashMap;
 use shrimply_gpu_cuda::{CudaContext, sys};
@@ -188,8 +188,8 @@ fn import_manim_source(
         context,
         stream,
         shrimply_gpu_cuda::external::ImageDescriptor {
-            fd: exported.fd,
-            semaphore_fd: exported.semaphore_fd,
+            handle: exported.handle,
+            semaphore_handle: exported.semaphore_handle,
             allocation_size,
             width: exported.width,
             height: exported.height,

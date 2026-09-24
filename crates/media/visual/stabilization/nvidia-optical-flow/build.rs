@@ -22,7 +22,9 @@ fn main() {
         .compile("shrimply_nvidia_optical_flow_bridge");
 
     println!("cargo:rustc-link-lib=dylib=cuda");
+    if !cfg!(target_os = "windows") {
     println!("cargo:rustc-link-lib=dylib=dl");
+    }
     println!("cargo:rerun-if-changed=src/bridge.cpp");
     println!("cargo:rerun-if-changed=include/nvOpticalFlowCommon.h");
     println!("cargo:rerun-if-changed=include/nvOpticalFlowCuda.h");

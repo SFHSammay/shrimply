@@ -3,7 +3,11 @@ use shrimply_math_core::Fraction;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
+#[cfg(windows)]
+use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -19,6 +23,11 @@ const WORKER: &str = include_str!("worker.py");
 static BLENDER_BINARY: LazyLock<RwLock<Option<PathBuf>>> = LazyLock::new(RwLock::default);
 static METADATA_CACHE: LazyLock<Mutex<HashMap<DiscoveryKey, Metadata>>> =
     LazyLock::new(Mutex::default);
+
+#[cfg(unix)]
+type WorkerStream = UnixStream;
+#[cfg(windows)]
+type WorkerStream = TcpStream;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct DiscoveryKey {
@@ -143,7 +152,7 @@ enum PixelFormat {
 
 pub struct Session {
     child: Child,
-    socket: UnixStream,
+    socket: WorkerStream,
     _worker_file: tempfile::NamedTempFile,
     _stderr_file: tempfile::NamedTempFile,
     metadata: Metadata,
@@ -223,11 +232,17 @@ impl Session {
                 binary.display()
             ));
         }
+        #[cfg(unix)]
         let socket_dir = tempfile::tempdir()
             .map_err(|error| format!("create Blender socket directory: {error}"))?;
+        #[cfg(unix)]
         let socket_path = socket_dir.path().join("worker.sock");
+        #[cfg(unix)]
         let listener = UnixListener::bind(&socket_path)
             .map_err(|error| format!("bind Blender worker socket: {error}"))?;
+        #[cfg(windows)]
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|error| format!("bind Blender worker TCP listener: {error}"))?;
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("configure Blender worker listener: {error}"))?;
@@ -249,20 +264,31 @@ impl Session {
         if let Some(blend) = blend {
             command.arg(blend);
         }
+        command.arg("--python").arg(worker_file.path()).arg("--");
+        #[cfg(unix)]
+        command.arg("--socket").arg(&socket_path);
+        #[cfg(windows)]
+        {
+            let port = listener
+                .local_addr()
+                .map_err(|error| format!("inspect Blender worker TCP listener: {error}"))?
+                .port();
+            command
+                .arg("--tcp-host")
+                .arg("127.0.0.1")
+                .arg("--tcp-port")
+                .arg(port.to_string());
+        }
         command
-            .arg("--python")
-            .arg(worker_file.path())
-            .arg("--")
-            .arg("--socket")
-            .arg(&socket_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(
                 stderr_file
                     .reopen()
                     .map_err(|error| format!("capture Blender stderr: {error}"))?,
-            )
-            .process_group(0);
+            );
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|error| format!("start Blender worker: {error}"))?;
@@ -295,6 +321,7 @@ impl Session {
                 Err(error) => return Err(format!("accept Blender worker connection: {error}")),
             }
         };
+        #[cfg(unix)]
         drop(socket_dir);
         // macOS inherits the listener's nonblocking mode on accepted sockets.
         socket
@@ -439,10 +466,17 @@ impl Drop for Session {
     }
 }
 
+#[cfg(unix)]
 fn terminate(child: &mut Child) {
     unsafe {
         libc::kill(-(child.id() as i32), libc::SIGTERM);
     }
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+fn terminate(child: &mut Child) {
+    let _ = child.kill();
     let _ = child.wait();
 }
 

@@ -44,5 +44,22 @@
     <file alias="sliders-horizontal-symbolic.svg">../../../../../assets/icons/sliders-horizontal-symbolic.svg</file>
     <file alias="sound-symbolic.svg">../../../../../assets/icons/sound-symbolic.svg</file>
     <file alias="speedometer-symbolic.svg">../../../../../assets/icons/speedometer-symbolic.svg</file>
+    <file alias="appearance-symbolic.svg">../../../../../assets/icons/appearance-symbolic.svg</file>
+    <file alias="check-plain-symbolic.svg">../../../../../assets/icons/check-plain-symbolic.svg</file>
+    <file alias="cut-symbolic.svg">../../../../../assets/icons/cut-symbolic.svg</file>
+    <file alias="document-open-symbolic.svg">../../../../../assets/icons/document-open-symbolic.svg</file>
+    <file alias="eraser-symbolic.svg">../../../../../assets/icons/eraser-symbolic.svg</file>
+    <file alias="external-link-symbolic.svg">../../../../../assets/icons/external-link-symbolic.svg</file>
+    <file alias="fill-tool-symbolic.svg">../../../../../assets/icons/fill-tool-symbolic.svg</file>
+    <file alias="four-arrows-pointing-inward-symbolic.svg">../../../../../assets/icons/four-arrows-pointing-inward-symbolic.svg</file>
+    <file alias="four-arrows-pointing-outward-symbolic.svg">../../../../../assets/icons/four-arrows-pointing-outward-symbolic.svg</file>
+    <file alias="magnet-tilted-symbolic.svg">../../../../../assets/icons/magnet-tilted-symbolic.svg</file>
+    <file alias="move-tool-symbolic.svg">../../../../../assets/icons/move-tool-symbolic.svg</file>
+    <file alias="pencil-symbolic.svg">../../../../../assets/icons/pencil-symbolic.svg</file>
+    <file alias="ruler-angled-symbolic.svg">../../../../../assets/icons/ruler-angled-symbolic.svg</file>
+    <file alias="select-symbolic.svg">../../../../../assets/icons/select-symbolic.svg</file>
+    <file alias="track-block-symbolic.svg">../../../../../assets/icons/track-block-symbolic.svg</file>
+    <file alias="track-insert-symbolic.svg">../../../../../assets/icons/track-insert-symbolic.svg</file>
+    <file alias="track-move-above-symbolic.svg">../../../../../assets/icons/track-move-above-symbolic.svg</file>
   </qresource>
 </RCC>

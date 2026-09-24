@@ -42,6 +42,19 @@ impl Compiler {
         println!("cargo:rerun-if-changed={}", directory.display());
         println!("cargo:rerun-if-changed={}", crate::LIBRARY_DIR);
         // Load the bridge built with this crate; it links the pinned Slang C++ API.
+        #[cfg(windows)]
+        let api = unsafe {
+            use libloading::os::windows::{
+                Library, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+            };
+            Library::load_with_flags(
+                env!("SHRIMPLY_SLANG_API"),
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+            )
+            .map(libloading::Library::from)
+        }
+        .expect("load Slang C++ API bridge");
+        #[cfg(not(windows))]
         let api = unsafe { libloading::Library::new(env!("SHRIMPLY_SLANG_API")) }
             .expect("load Slang C++ API bridge");
         Self {

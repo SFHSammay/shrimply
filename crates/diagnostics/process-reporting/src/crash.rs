@@ -1,14 +1,20 @@
 use std::backtrace::Backtrace;
 use std::panic::PanicHookInfo;
 use std::sync::Mutex;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 static LAST_CONTEXT: Mutex<Option<String>> = Mutex::new(None);
+#[cfg(unix)]
 const SIGNAL_CONTEXT_CAP: usize = 384;
+#[cfg(unix)]
 const SIGNAL_CONTEXT_HISTORY: usize = 8;
+#[cfg(unix)]
 static SIGNAL_CONTEXT_WRITTEN: AtomicUsize = AtomicUsize::new(0);
+#[cfg(unix)]
 static SIGNAL_CONTEXT_LENS: [AtomicUsize; SIGNAL_CONTEXT_HISTORY] =
     [const { AtomicUsize::new(0) }; SIGNAL_CONTEXT_HISTORY];
+#[cfg(unix)]
 static SIGNAL_CONTEXTS: [[AtomicU8; SIGNAL_CONTEXT_CAP]; SIGNAL_CONTEXT_HISTORY] =
     [const { [const { AtomicU8::new(0) }; SIGNAL_CONTEXT_CAP] }; SIGNAL_CONTEXT_HISTORY];
 
@@ -41,6 +47,8 @@ pub fn install() {
         );
     }));
 
+    #[cfg(unix)]
+    {
     for signal in [
         libc::SIGABRT,
         libc::SIGBUS,
@@ -51,17 +59,22 @@ pub fn install() {
     ] {
         install_signal_handler(signal);
     }
+    }
 }
 
 pub fn set_context(context: impl Into<String>) {
     let context = context.into();
+    #[cfg(unix)]
+    {
     store_signal_context(&context);
+    }
     match LAST_CONTEXT.lock() {
         Ok(mut last_context) => *last_context = Some(context),
         Err(error) => *error.into_inner() = Some(context),
     }
 }
 
+#[cfg(unix)]
 fn store_signal_context(context: &str) {
     let slot = SIGNAL_CONTEXT_WRITTEN.load(Ordering::SeqCst) % SIGNAL_CONTEXT_HISTORY;
     SIGNAL_CONTEXT_LENS[slot].store(0, Ordering::SeqCst);
@@ -99,6 +112,7 @@ fn last_context() -> String {
     }
 }
 
+#[cfg(unix)]
 fn install_signal_handler(signal: i32) {
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
@@ -111,6 +125,7 @@ fn install_signal_handler(signal: i32) {
     }
 }
 
+#[cfg(unix)]
 extern "C" fn fatal_signal_handler(signal: i32) {
     unsafe {
         write_stderr(signal_message(signal));
@@ -130,6 +145,7 @@ extern "C" fn fatal_signal_handler(signal: i32) {
     }
 }
 
+#[cfg(unix)]
 fn signal_message(signal: i32) -> &'static [u8] {
     match signal {
         libc::SIGABRT => b"\nshrimply crash: received SIGABRT.\n",
@@ -142,6 +158,7 @@ fn signal_message(signal: i32) -> &'static [u8] {
     }
 }
 
+#[cfg(unix)]
 unsafe fn write_signal_context() {
     unsafe {
         let written = SIGNAL_CONTEXT_WRITTEN.load(Ordering::SeqCst);
@@ -171,6 +188,7 @@ unsafe fn write_signal_context() {
     }
 }
 
+#[cfg(unix)]
 unsafe fn write_stderr(message: &[u8]) {
     unsafe {
         let _ = libc::write(libc::STDERR_FILENO, message.as_ptr().cast(), message.len());

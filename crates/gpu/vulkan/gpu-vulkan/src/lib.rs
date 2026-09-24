@@ -1,15 +1,24 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "windows"))]
 
 use ash_wgpu::{khr, vk};
 use std::{
     borrow::Cow,
     cell::Cell,
-    os::fd::{FromRawFd, OwnedFd},
 };
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
+#[cfg(target_os = "windows")]
+use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
+
+#[cfg(target_os = "linux")]
+pub type ExportHandle = OwnedFd;
+#[cfg(target_os = "windows")]
+pub type ExportHandle = OwnedHandle;
+
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub struct ExportedFrame {
-    pub fd: OwnedFd,
-    pub semaphore_fd: OwnedFd,
+    pub handle: ExportHandle,
+    pub semaphore_handle: ExportHandle,
     pub allocation_size: u64,
     pub width: u32,
     pub height: u32,
@@ -68,8 +77,18 @@ pub fn device_for_cuda(
                 &descriptor.required_limits,
                 &descriptor.memory_hints,
                 Some(Box::new(|args| {
+                    #[cfg(target_os = "linux")]
                     if !args.extensions.contains(&khr::external_semaphore_fd::NAME) {
                         args.extensions.push(khr::external_semaphore_fd::NAME);
+                    }
+                    #[cfg(target_os = "windows")]
+                    {
+                        if !args.extensions.contains(&khr::external_memory_win32::NAME) {
+                            args.extensions.push(khr::external_memory_win32::NAME);
+                        }
+                        if !args.extensions.contains(&khr::external_semaphore_win32::NAME) {
+                            args.extensions.push(khr::external_semaphore_win32::NAME);
+                        }
                     }
                 })),
             )
@@ -179,6 +198,8 @@ impl ExternalImage {
     pub fn export(&self, device: &wgpu::Device) -> Result<ExportedFrame, String> {
         let hal = unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }
             .ok_or_else(|| "Vulkan device is not Vulkan".to_string())?;
+        #[cfg(target_os = "linux")]
+        let handle = {
         let external_memory = khr::external_memory_fd::Device::new(
             hal.shared_instance().raw_instance(),
             hal.raw_device(),
@@ -188,7 +209,23 @@ impl ExternalImage {
             .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
         let fd = unsafe { external_memory.get_memory_fd(&info) }
             .map_err(|error| format!("export Vulkan memory fd: {error:?}"))?;
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            unsafe { OwnedFd::from_raw_fd(fd) }
+        };
+        #[cfg(target_os = "windows")]
+        let handle = {
+            let external_memory = khr::external_memory_win32::Device::new(
+                hal.shared_instance().raw_instance(),
+                hal.raw_device(),
+            );
+            let info = vk::MemoryGetWin32HandleInfoKHR::default()
+                .memory(self.export_memory)
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32);
+            let handle = unsafe { external_memory.get_memory_win32_handle(&info) }
+                .map_err(|error| format!("export Vulkan memory handle: {error:?}"))?;
+            unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) }
+        };
+        #[cfg(target_os = "linux")]
+        let semaphore_handle = {
         let external_semaphore = khr::external_semaphore_fd::Device::new(
             hal.shared_instance().raw_instance(),
             hal.raw_device(),
@@ -198,9 +235,24 @@ impl ExternalImage {
             .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
         let semaphore_fd = unsafe { external_semaphore.get_semaphore_fd(&semaphore_info) }
             .map_err(|error| format!("export Vulkan semaphore fd: {error:?}"))?;
+            unsafe { OwnedFd::from_raw_fd(semaphore_fd) }
+        };
+        #[cfg(target_os = "windows")]
+        let semaphore_handle = {
+            let external_semaphore = khr::external_semaphore_win32::Device::new(
+                hal.shared_instance().raw_instance(),
+                hal.raw_device(),
+            );
+            let semaphore_info = vk::SemaphoreGetWin32HandleInfoKHR::default()
+                .semaphore(self.semaphore)
+                .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32);
+            let handle = unsafe { external_semaphore.get_semaphore_win32_handle(&semaphore_info) }
+                .map_err(|error| format!("export Vulkan semaphore handle: {error:?}"))?;
+            unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) }
+        };
         Ok(ExportedFrame {
-            fd,
-            semaphore_fd: unsafe { OwnedFd::from_raw_fd(semaphore_fd) },
+            handle,
+            semaphore_handle,
             allocation_size: self.export_allocation_size,
             width: self.width,
             height: self.height,
@@ -225,13 +277,13 @@ fn make_export_texture(
         .ok_or_else(|| "Vulkan device is not Vulkan".to_string())?;
     if !hal
         .enabled_device_extensions()
-        .contains(&khr::external_memory_fd::NAME)
+        .contains(&external_memory_extension_name())
     {
-        return Err("Vulkan device does not support external memory fd".to_string());
+        return Err("Vulkan device does not support external memory export".to_string());
     }
     let raw_device = hal.raw_device();
     let mut external = vk::ExternalMemoryImageCreateInfo::default()
-        .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        .handle_types(external_memory_handle_type());
     let create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(vk::Format::R8G8B8A8_UNORM)
@@ -276,7 +328,7 @@ fn make_export_texture(
         }
     };
     let mut export = vk::ExportMemoryAllocateInfo::default()
-        .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        .handle_types(external_memory_handle_type());
     let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
     let allocate_info = vk::MemoryAllocateInfo::default()
         .allocation_size(requirements.size)
@@ -353,13 +405,13 @@ fn make_export_semaphore(
         .ok_or_else(|| "Vulkan device is not Vulkan".to_string())?;
     if !hal
         .enabled_device_extensions()
-        .contains(&khr::external_semaphore_fd::NAME)
+        .contains(&external_semaphore_extension_name())
     {
-        return Err("Vulkan device does not support external semaphore fd".to_string());
+        return Err("Vulkan device does not support external semaphore export".to_string());
     }
     let raw_device = hal.raw_device().clone();
     let mut external = vk::ExportSemaphoreCreateInfo::default()
-        .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+        .handle_types(external_semaphore_handle_type());
     let mut timeline = vk::SemaphoreTypeCreateInfo::default()
         .semaphore_type(vk::SemaphoreType::TIMELINE)
         .initial_value(0);
@@ -369,4 +421,48 @@ fn make_export_semaphore(
     let semaphore = unsafe { raw_device.create_semaphore(&info, None) }
         .map_err(|error| format!("create Vulkan timeline semaphore: {error:?}"))?;
     Ok((semaphore, raw_device))
+}
+
+fn external_memory_handle_type() -> vk::ExternalMemoryHandleTypeFlags {
+    #[cfg(target_os = "linux")]
+    {
+        vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD
+    }
+    #[cfg(target_os = "windows")]
+    {
+        vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32
+    }
+}
+
+fn external_semaphore_handle_type() -> vk::ExternalSemaphoreHandleTypeFlags {
+    #[cfg(target_os = "linux")]
+    {
+        vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD
+    }
+    #[cfg(target_os = "windows")]
+    {
+        vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32
+    }
+}
+
+fn external_memory_extension_name() -> &'static std::ffi::CStr {
+    #[cfg(target_os = "linux")]
+    {
+        khr::external_memory_fd::NAME
+    }
+    #[cfg(target_os = "windows")]
+    {
+        khr::external_memory_win32::NAME
+    }
+}
+
+fn external_semaphore_extension_name() -> &'static std::ffi::CStr {
+    #[cfg(target_os = "linux")]
+    {
+        khr::external_semaphore_fd::NAME
+    }
+    #[cfg(target_os = "windows")]
+    {
+        khr::external_semaphore_win32::NAME
+    }
 }

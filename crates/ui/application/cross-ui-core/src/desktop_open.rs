@@ -1,8 +1,12 @@
+#[cfg(unix)]
 use gio::prelude::DBusProxyExt;
+#[cfg(unix)]
 use glib::variant::ToVariant;
+#[cfg(unix)]
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 const DEFAULT_DBUS_TIMEOUT: i32 = -1;
 
 pub enum Action {
@@ -27,6 +31,7 @@ pub fn prepare(path: &Path, activation_token: Option<&str>) -> Result<Action, St
     ))
 }
 
+#[cfg(unix)]
 fn reveal_file(path: &Path, activation_token: Option<&str>) {
     let path_display = path.display();
     let file = match File::open(path) {
@@ -68,6 +73,18 @@ fn reveal_file(path: &Path, activation_token: Option<&str>) {
     match result {
         Ok(()) => tracing::info!("file reveal portal complete path={path_display}"),
         Err(error) => tracing::warn!("file reveal portal failed path={path_display}: {error}"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_file(path: &Path, _activation_token: Option<&str>) {
+    let path_display = path.display();
+    match std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+    {
+        Ok(_) => tracing::info!("file reveal explorer started path={path_display}"),
+        Err(error) => tracing::warn!("file reveal explorer failed path={path_display}: {error}"),
     }
 }
 

@@ -475,7 +475,7 @@ fn generate_enums(
         output.push_str("    }\n");
         if device_copy {
             output.push_str(&format!(
-                "    #[cfg(all(feature = \"cuda\", target_os = \"linux\"))]\n    unsafe impl shrimply_gpu_cuda::DeviceCopy for {name} {{}}\n"
+                "    #[cfg(all(feature = \"cuda\", any(target_os = \"linux\", target_os = \"windows\")))]\n    unsafe impl shrimply_gpu_cuda::DeviceCopy for {name} {{}}\n"
             ));
         }
     }
@@ -619,7 +619,7 @@ fn generate_struct(
     output.push_str("    }\n");
     if device_copy {
         output.push_str(&format!(
-            "    #[cfg(all(feature = \"cuda\", target_os = \"linux\"))]\n    unsafe impl shrimply_gpu_cuda::DeviceCopy for {name} {{}}\n"
+            "    #[cfg(all(feature = \"cuda\", any(target_os = \"linux\", target_os = \"windows\")))]\n    unsafe impl shrimply_gpu_cuda::DeviceCopy for {name} {{}}\n"
         ));
     }
     output.push_str(&format!(

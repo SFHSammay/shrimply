@@ -1,6 +1,7 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
 const VERSION: &str = "2026.17";
+const WINDOWS_X86_64_SHA256: &str = "bc8cf08b24aaf44d98f06b7d578d0557a21bfed1ce6bfb9765a0f0d21dec8f31";
 
 fn main() {
     for variable in ["SLANG_LIBRARY_DIR", "SLANG_INCLUDE_DIR"] {
@@ -30,6 +31,7 @@ fn main() {
                     "linux-x86_64-glibc-2.28",
                     "a5a48530e7218d79e10b633c216ef04cbe778450b8c0a7579125e630c088ca75",
                 ),
+                ("windows", "x86_64") => ("windows-x86_64", WINDOWS_X86_64_SHA256),
                 host => panic!("no prebuilt Slang release for {host:?}"),
             };
             let output = PathBuf::from(env::var_os("OUT_DIR").expect("Slang build output"));
@@ -44,6 +46,86 @@ fn main() {
                 .expect("open Slang download lock");
             lock.lock().expect("lock Slang download");
             let marker = cache.join(".shrimply-prebuilt");
+            if cfg!(target_os = "windows") {
+                let checksum = WINDOWS_X86_64_SHA256;
+                if fs::read_to_string(&marker).ok().as_deref() != Some(checksum) {
+                    let staging = profile.join(format!("slang-{VERSION}-windows-x86_64.tmp"));
+                    if staging.exists() {
+                        fs::remove_dir_all(&staging).expect("remove interrupted Slang download");
+                    }
+                    fs::create_dir(&staging).expect("create Slang download directory");
+                    let archive = staging.join("slang.zip");
+                    println!("cargo:warning=Downloading Slang {VERSION} for windows-x86_64");
+                    let status = Command::new("curl")
+                        .args(["--fail", "--location", "--silent", "--show-error", "--retry", "3"])
+                        .arg(format!("https://github.com/shader-slang/slang/releases/download/v{VERSION}/slang-{VERSION}-windows-x86_64.zip"))
+                        .arg("--output")
+                        .arg(&archive)
+                        .status()
+                        .expect("download Slang with curl");
+                    assert!(status.success(), "download Slang: {status}");
+                    let hash = Command::new("powershell")
+                        .args([
+                            "-NoProfile",
+                            "-Command",
+                            "& { param([string]$Archive) (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash }",
+                        ])
+                        .arg(&archive)
+                        .output()
+                        .expect("hash Slang archive");
+                    assert!(
+                        hash.status.success(),
+                        "hash Slang archive: {}\n{}",
+                        hash.status,
+                        String::from_utf8_lossy(&hash.stderr)
+                    );
+                    let actual_checksum = String::from_utf8_lossy(&hash.stdout)
+                        .split_whitespace()
+                        .next()
+                        .expect("PowerShell Get-FileHash must print a checksum")
+                        .to_owned();
+                    assert!(
+                        actual_checksum.eq_ignore_ascii_case(checksum),
+                        "Slang archive checksum mismatch"
+                    );
+                    let extract = Command::new("powershell")
+                        .args([
+                            "-NoProfile",
+                            "-Command",
+                            "& { param([string]$Archive, [string]$Destination) Expand-Archive -LiteralPath $Archive -DestinationPath $Destination -Force }",
+                        ])
+                        .arg(&archive)
+                        .arg(&staging)
+                        .output()
+                        .expect("extract Slang archive");
+                    assert!(
+                        extract.status.success(),
+                        "extract Slang archive: {}\n{}",
+                        extract.status,
+                        String::from_utf8_lossy(&extract.stderr)
+                    );
+                    assert!(
+                        staging.join("bin/slang.dll").is_file(),
+                        "Slang archive is missing its library"
+                    );
+                    assert!(
+                        staging.join("lib/slang.lib").is_file(),
+                        "Slang archive is missing its import library"
+                    );
+                    assert!(
+                        staging.join("include/slang.h").is_file(),
+                        "Slang archive is missing its headers"
+                    );
+                    fs::remove_file(archive).expect("remove extracted Slang archive");
+                    fs::write(staging.join(".shrimply-prebuilt"), checksum)
+                        .expect("mark verified Slang cache");
+                    if cache.exists() {
+                        fs::remove_dir_all(&cache).expect("remove outdated Slang cache");
+                    }
+                    fs::rename(staging, &cache).expect("publish verified Slang cache");
+                }
+                return build(cache.join("lib"), cache.join("include"));
+            }
             if fs::read_to_string(&marker).ok().as_deref() != Some(checksum) {
                 let staging = profile.join(format!("slang-{VERSION}-{platform}.tmp"));
                 if staging.exists() {
@@ -108,11 +190,23 @@ fn main() {
             "set both SLANG_LIBRARY_DIR and SLANG_INCLUDE_DIR to use an existing Slang distribution"
         ),
     };
+    build(library_dir, include_dir);
+}
+
+fn build(library_dir: PathBuf, include_dir: PathBuf) {
     let library = library_dir.join(format!("libslang.{}", env::consts::DLL_EXTENSION));
+    let runtime_library = if cfg!(target_os = "windows") {
+        library_dir
+            .parent()
+            .expect("Slang library directory parent")
+            .join("bin/slang.dll")
+    } else {
+        library.clone()
+    };
     assert!(
-        library.is_file(),
+        runtime_library.is_file(),
         "missing prebuilt Slang library: {}",
-        library.display()
+        runtime_library.display()
     );
     assert!(
         include_dir.join("slang.h").is_file(),
@@ -127,12 +221,52 @@ fn main() {
     println!("cargo:rerun-if-changed={}", include_dir.display());
     println!(
         "cargo:rustc-env=SHRIMPLY_SLANG_LIBRARY_DIR={}",
-        library_dir.display()
+        runtime_library
+            .parent()
+            .expect("Slang runtime library directory")
+            .display()
     );
     let bridge = output.join(format!(
         "libshrimply_slang_api.{}",
         env::consts::DLL_EXTENSION
     ));
+    if cfg!(target_os = "windows") {
+        assert!(
+            library_dir.join("slang.lib").is_file(),
+            "missing prebuilt Slang import library: {}",
+            library_dir.join("slang.lib").display()
+        );
+        fs::copy(&runtime_library, output.join("slang.dll"))
+            .expect("stage Slang runtime library next to bridge DLL");
+        fs::copy(
+            runtime_library
+                .parent()
+                .expect("Slang runtime library directory")
+                .join("slang-compiler.dll"),
+            output.join("slang-compiler.dll"),
+        )
+        .expect("stage Slang compiler library next to bridge DLL");
+        let status = cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .pic(true)
+            .cargo_metadata(false)
+            .get_compiler()
+            .to_command()
+            .arg("/LD")
+            .arg("compiler.cpp")
+            .arg(format!("/I{}", include_dir.display()))
+            .arg("slang.lib")
+            .arg("/link")
+            .arg("/EXPORT:shrimply_slang_compile")
+            .arg(format!("/LIBPATH:{}", library_dir.display()))
+            .arg(format!("/OUT:{}", bridge.display()))
+            .status()
+            .expect("build Slang C++ API bridge");
+        assert!(status.success(), "build Slang C++ API bridge: {status}");
+        println!("cargo:rustc-env=SHRIMPLY_SLANG_API={}", bridge.display());
+        return;
+    }
     let status = cc::Build::new()
         .cpp(true)
         .std("c++17")

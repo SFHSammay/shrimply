@@ -6085,6 +6085,7 @@ dependencies = [
  "shrimply-gpu-cuda",
  "shrimply-profiling",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6769,6 +6770,7 @@ dependencies = [
  "shrimply-project-document",
  "shrimply-recent-projects",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6789,6 +6791,8 @@ dependencies = [
 name = "shrimply-preferences-qt"
 version = "0.1.0"
 dependencies = [
+ "cxx-qt",
+ "cxx-qt-build",
  "cxx-qt-lib",
  "shrimply-math-color",
  "shrimply-preferences-core",
@@ -6866,6 +6870,7 @@ dependencies = [
 name = "shrimply-preview-qt"
 version = "0.1.0"
 dependencies = [
+ "ffmpeg-next",
  "glam 0.33.5",
  "shrimply-audio-engine",
  "shrimply-components-skia",
@@ -6879,10 +6884,13 @@ dependencies = [
  "shrimply-preview-runtime-cuda",
  "shrimply-project-document",
  "shrimply-project-evaluation",
+ "shrimply-property-transfer",
+ "shrimply-resource-pipeline",
  "shrimply-surface-gl-skia",
  "shrimply-timeline-edit",
  "shrimply-timeline-gtk",
  "shrimply-timeline-qt",
+ "shrimply-timeline-skia",
  "shrimply-visual-cuda",
  "skia-safe",
  "tracing",
@@ -7036,6 +7044,7 @@ dependencies = [
  "strum",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

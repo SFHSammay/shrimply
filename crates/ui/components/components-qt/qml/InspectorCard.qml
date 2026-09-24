@@ -65,14 +65,11 @@ Frame {
         }
     }
 
-    Rectangle {
-        anchors.fill: parent
+    background: Rectangle {
         color: "transparent"
         border.color: root.palette.highlight
         border.width: root.accented ? 2 : 0
         radius: 3
-        enabled: false
-        z: 1
     }
 
     contentItem: ColumnLayout {

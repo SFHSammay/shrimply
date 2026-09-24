@@ -333,10 +333,14 @@ void DragInput::finish() {
 }
 
 bool DragInput::beginPointerLock() {
+#ifdef Q_OS_WIN
+    return false;
+#else
     auto *wayland = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
     void *surface = window() ? reinterpret_cast<void *>(window()->winId()) : nullptr;
     return wayland && shrimply_qt_number_begin_pointer_lock(
                           wayland->display(), surface, wayland->seat());
+#endif
 }
 
 TypoHighlighter::TypoHighlighter(QObject *parent) : QObject(parent) {}

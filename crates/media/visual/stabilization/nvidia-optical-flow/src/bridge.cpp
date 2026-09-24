@@ -1,5 +1,10 @@
 #include <cuda.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <nvOpticalFlowCuda.h>
 
 #include <cstddef>
@@ -17,7 +22,11 @@ struct Buffer {
 };
 
 struct Context {
+#ifdef _WIN32
+    HMODULE library = nullptr;
+#else
     void* library = nullptr;
+#endif
     NV_OF_CUDA_API_FUNCTION_LIST api{};
     NvOFHandle handle = nullptr;
     CUcontext cuda_context = nullptr;
@@ -138,7 +147,11 @@ void destroy(Context* context) {
         context->api.nvOFDestroy(context->handle);
     }
     if (context->library != nullptr) {
+#ifdef _WIN32
+        FreeLibrary(context->library);
+#else
         dlclose(context->library);
+#endif
     }
     delete context;
 }
@@ -220,19 +233,36 @@ extern "C" Context* shrimply_nvof_create(
         destroy(context);
         return nullptr;
     }
+#ifdef _WIN32
+    context->library = LoadLibraryA("nvofapi64.dll");
+    if (context->library == nullptr) {
+        set_error(error, error_size, "load NVIDIA optical flow driver", "failed to load nvofapi64.dll");
+        destroy(context);
+        return nullptr;
+    }
+#else
     context->library = dlopen("libnvidia-opticalflow.so.1", RTLD_NOW | RTLD_LOCAL);
     if (context->library == nullptr) {
         set_error(error, error_size, "load NVIDIA optical flow driver", dlerror());
         destroy(context);
         return nullptr;
     }
-    using CreateInstance = NV_OF_STATUS (*)(uint32_t, NV_OF_CUDA_API_FUNCTION_LIST*);
+#endif
+    using CreateInstance = NV_OF_STATUS (NVOFAPI *)(uint32_t, NV_OF_CUDA_API_FUNCTION_LIST*);
     CreateInstance create_instance = nullptr;
+#ifdef _WIN32
+    auto symbol = GetProcAddress(context->library, "NvOFAPICreateInstanceCuda");
+#else
     void* symbol = dlsym(context->library, "NvOFAPICreateInstanceCuda");
+#endif
     static_assert(sizeof(create_instance) == sizeof(symbol));
     std::memcpy(&create_instance, &symbol, sizeof(create_instance));
     if (create_instance == nullptr) {
+#ifdef _WIN32
+        set_error(error, error_size, "load NVIDIA optical flow entry point", "NvOFAPICreateInstanceCuda was not found");
+#else
         set_error(error, error_size, "load NVIDIA optical flow entry point", dlerror());
+#endif
         destroy(context);
         return nullptr;
     }

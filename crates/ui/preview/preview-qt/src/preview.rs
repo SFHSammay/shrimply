@@ -8,6 +8,7 @@ use shrimply_preview_provider_skia::{
 use shrimply_preview_runtime_cuda::provider::{
     BuildContext, PreparedGeometry, SnapPreparation, prepare_geometry, prepare_snap_scene,
 };
+use shrimply_paint_edit_skia::{PAINT_PREVIEW_STATE, PaintPreviewMode, PaintPreviewState};
 use shrimply_project_document::project::{ItemAddress, PreviewGuides};
 use shrimply_project_evaluation::{FrameAudioAnalysis, TransformExpressionCache};
 use shrimply_timeline_edit::selection_state::{self, SharedSelectionState};
@@ -655,6 +656,62 @@ impl ToolkitPreview {
 
     pub fn set_guides_visible(&self, visible: bool) {
         preferences_store::set_preview_guides_visible(&self.preferences, visible);
+    }
+
+    fn paint_state<R>(&self, read: impl FnOnce(&PaintPreviewState) -> R) -> R {
+        let state = self
+            .extensions
+            .get(&PAINT_PREVIEW_STATE)
+            .and_then(|value| value.downcast_ref::<PaintPreviewState>())
+            .expect("Qt paint preview state is missing");
+        read(state)
+    }
+
+    fn update_paint_state(&mut self, update: impl FnOnce(&mut PaintPreviewState)) {
+        let state = self
+            .extensions
+            .get_mut(&PAINT_PREVIEW_STATE)
+            .and_then(|value| value.downcast_mut::<PaintPreviewState>())
+            .expect("Qt paint preview state is missing");
+        update(state);
+    }
+
+    pub fn pen_tool_active(&self) -> bool {
+        self.paint_state(|state| state.mode == PaintPreviewMode::Pen && !state.eraser)
+    }
+
+    pub fn fill_tool_active(&self) -> bool {
+        self.paint_state(|state| state.mode == PaintPreviewMode::Fill)
+    }
+
+    pub fn transform_tool_active(&self) -> bool {
+        self.paint_state(|state| state.mode == PaintPreviewMode::StrokeTransform)
+    }
+
+    pub fn eraser_tool_active(&self) -> bool {
+        self.paint_state(|state| state.eraser)
+    }
+
+    pub fn select_pen_tool(&mut self) {
+        self.update_paint_state(|state| {
+            state.set_eraser(false);
+            state.set_mode(PaintPreviewMode::Pen);
+        });
+    }
+
+    pub fn select_fill_tool(&mut self) {
+        self.update_paint_state(|state| {
+            state.set_eraser(false);
+            state.set_mode(PaintPreviewMode::Fill);
+        });
+    }
+
+    pub fn select_transform_tool(&mut self) {
+        self.update_paint_state(|state| state.set_mode(PaintPreviewMode::StrokeTransform));
+    }
+
+    pub fn set_eraser_tool_active(&mut self, active: bool) {
+        self.update_paint_state(|state| state.set_eraser(active));
     }
 
     pub fn pointer_move(&mut self, width: f32, height: f32, x: f32, y: f32, modifiers: Modifiers) {

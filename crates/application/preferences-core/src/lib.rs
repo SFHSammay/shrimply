@@ -1114,6 +1114,7 @@ fn clamp_fraction(value: Fraction, maximum: Fraction) -> Fraction {
     }
 }
 
+#[cfg(unix)]
 pub fn physical_system_memory_gib() -> Fraction {
     let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
     let page_bytes = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
@@ -1125,6 +1126,23 @@ pub fn physical_system_memory_gib() -> Fraction {
         .checked_mul(page_bytes)
         .expect("detect physical system RAM: byte count overflowed");
     Fraction::new_raw(bytes, GIB_BYTES)
+}
+
+#[cfg(target_os = "windows")]
+pub fn physical_system_memory_gib() -> Fraction {
+    use windows_sys::Win32::System::SystemInformation::{
+        GlobalMemoryStatusEx, MEMORYSTATUSEX,
+    };
+
+    let mut status = MEMORYSTATUSEX::default();
+    status.dwLength = u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>())
+        .expect("detect physical system RAM: MEMORYSTATUSEX size exceeds u32");
+    let result = unsafe { GlobalMemoryStatusEx(&mut status) };
+    assert!(
+        result != 0,
+        "detect physical system RAM: GlobalMemoryStatusEx failed"
+    );
+    Fraction::new_raw(status.ullTotalPhys, GIB_BYTES)
 }
 
 fn parse_u32(value: &str) -> Option<u32> {

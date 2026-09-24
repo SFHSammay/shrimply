@@ -1,6 +1,8 @@
 use std::ffi::{CStr, CString};
 use std::fmt::Write;
 use std::fs;
+#[cfg(target_os = "windows")]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,12 +34,21 @@ const VECTOR_SKIA_FORMAT: skia_vk::Format = skia_vk::Format::R8G8B8A8_UNORM;
 static IMPORTED_VULKAN_FRAMES: AtomicU64 = AtomicU64::new(0);
 static IMPORTED_VULKAN_BYTES: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "linux")]
+type ExternalMemoryDevice = ash::khr::external_memory_fd::Device;
+#[cfg(target_os = "windows")]
+type ExternalMemoryDevice = ash::khr::external_memory_win32::Device;
+#[cfg(target_os = "linux")]
+type ExternalSemaphoreDevice = ash::khr::external_semaphore_fd::Device;
+#[cfg(target_os = "windows")]
+type ExternalSemaphoreDevice = ash::khr::external_semaphore_win32::Device;
+
 pub struct GeneratedGpuRenderer {
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     queue: vk::Queue,
-    external_memory_fd: ash::khr::external_memory_fd::Device,
-    external_semaphore_fd: ash::khr::external_semaphore_fd::Device,
+    external_memory: ExternalMemoryDevice,
+    external_semaphore: ExternalSemaphoreDevice,
     skia: gpu::DirectContext,
     expression_cache: TransformExpressionCache,
     gaussian_3d: Option<shrimply_3dgs_vulkan::Renderer>,
@@ -83,9 +94,9 @@ impl GeneratedGpuRenderer {
         let external_semaphore_name = CString::new("VK_KHR_external_semaphore").unwrap();
         let device_extensions = [
             external_memory_name.as_ptr(),
-            ash::khr::external_memory_fd::NAME.as_ptr(),
+            external_memory_extension_name().as_ptr(),
             external_semaphore_name.as_ptr(),
-            ash::khr::external_semaphore_fd::NAME.as_ptr(),
+            external_semaphore_extension_name().as_ptr(),
             ash::khr::buffer_device_address::NAME.as_ptr(),
             ash::khr::deferred_host_operations::NAME.as_ptr(),
             ash::khr::acceleration_structure::NAME.as_ptr(),
@@ -149,10 +160,8 @@ impl GeneratedGpuRenderer {
             vulkan: vulkan.clone(),
             handle: command_pool,
         };
-        let external_memory_fd =
-            ash::khr::external_memory_fd::Device::new(&vulkan.instance, &vulkan.device);
-        let external_semaphore_fd =
-            ash::khr::external_semaphore_fd::Device::new(&vulkan.instance, &vulkan.device);
+        let external_memory = ExternalMemoryDevice::new(&vulkan.instance, &vulkan.device);
+        let external_semaphore = ExternalSemaphoreDevice::new(&vulkan.instance, &vulkan.device);
 
         let skia = make_skia_context(
             &vulkan._entry,
@@ -169,8 +178,8 @@ impl GeneratedGpuRenderer {
             queue_family_index,
             queue,
             command_pool,
-            external_memory_fd,
-            external_semaphore_fd,
+            external_memory,
+            external_semaphore,
             skia,
             expression_cache: TransformExpressionCache::default(),
             gaussian_3d: None,
@@ -482,7 +491,7 @@ impl GeneratedGpuRenderer {
 
     fn create_exported_buffer(&mut self, size: u64) -> Result<ExportedBuffer, String> {
         let mut external_info = vk::ExternalMemoryBufferCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+            .handle_types(external_memory_handle_type());
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(
@@ -506,7 +515,7 @@ impl GeneratedGpuRenderer {
             }
         };
         let mut export_info = vk::ExportMemoryAllocateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+            .handle_types(external_memory_handle_type());
         let allocate_info = vk::MemoryAllocateInfo::default()
             .allocation_size(requirements.size)
             .memory_type_index(memory_type)
@@ -538,7 +547,7 @@ impl GeneratedGpuRenderer {
 
     fn create_exported_semaphore(&self) -> Result<VulkanSemaphore, String> {
         let mut export = vk::ExportSemaphoreCreateInfo::default()
-            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+            .handle_types(external_semaphore_handle_type());
         let info = vk::SemaphoreCreateInfo::default().push_next(&mut export);
         let handle = unsafe { self.vulkan.device.create_semaphore(&info, None) }
             .map_err(|error| format!("create background export semaphore: {error:?}"))?;
@@ -805,26 +814,59 @@ impl GeneratedGpuRenderer {
         buffer: ExportedBuffer,
         semaphore: VulkanSemaphore,
     ) -> Result<VisualFrame, String> {
-        let fd_info = vk::SemaphoreGetFdInfoKHR::default()
+        #[cfg(target_os = "linux")]
+        let semaphore_handle = {
+            let fd_info = vk::SemaphoreGetFdInfoKHR::default()
+                .semaphore(semaphore.handle)
+                .handle_type(external_semaphore_handle_type());
+            match unsafe { self.external_semaphore.get_semaphore_fd(&fd_info) } {
+                Ok(fd) => fd,
+                Err(error) => {
+                    wait_for_vulkan_idle_or_device_lost(&self.vulkan.device);
+                    return Err(format!("export background semaphore fd: {error:?}"));
+                }
+            }
+        };
+        #[cfg(target_os = "windows")]
+        let semaphore_handle = {
+            let handle_info = vk::SemaphoreGetWin32HandleInfoKHR::default()
             .semaphore(semaphore.handle)
-            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
-        let fd = match unsafe { self.external_semaphore_fd.get_semaphore_fd(&fd_info) } {
-            Ok(fd) => fd,
-            Err(error) => {
-                wait_for_vulkan_idle_or_device_lost(&self.vulkan.device);
-                return Err(format!("export background semaphore fd: {error:?}"));
+                .handle_type(external_semaphore_handle_type());
+            match unsafe { self.external_semaphore.get_semaphore_win32_handle(&handle_info) } {
+                Ok(handle) => unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) },
+                Err(error) => {
+                    wait_for_vulkan_idle_or_device_lost(&self.vulkan.device);
+                    return Err(format!("export background semaphore handle: {error:?}"));
+                }
             }
         };
         if let Err(error) = bind_context(&context, "bind CUDA context for background import") {
-            unsafe { libc::close(fd) };
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::close(semaphore_handle)
+            };
             wait_for_vulkan_idle_or_device_lost(&self.vulkan.device);
             return Err(error);
         }
         let mut external_semaphore = ptr::null_mut();
         let descriptor = sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC {
+            #[cfg(target_os = "linux")]
             type_:
                 sys::CUexternalSemaphoreHandleType_enum_CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD,
-            handle: sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC_st__bindgen_ty_1 { fd },
+            #[cfg(target_os = "windows")]
+            type_:
+                sys::CUexternalSemaphoreHandleType_enum_CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32,
+            #[cfg(target_os = "linux")]
+            handle: sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC_st__bindgen_ty_1 {
+                fd: semaphore_handle,
+            },
+            #[cfg(target_os = "windows")]
+            handle: sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC_st__bindgen_ty_1 {
+                win32: sys::CUDA_EXTERNAL_HANDLE_DESC_WIN32 {
+                    handle: semaphore_handle.as_raw_handle().cast(),
+                    name: ptr::null(),
+                },
+            },
             flags: 0,
             reserved: [0; 16],
         };
@@ -832,10 +874,15 @@ impl GeneratedGpuRenderer {
             unsafe { sys::cuImportExternalSemaphore(&mut external_semaphore, &descriptor) },
             "cuImportExternalSemaphore for background",
         ) {
-            unsafe { libc::close(fd) };
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::close(semaphore_handle)
+            };
             wait_for_vulkan_idle_or_device_lost(&self.vulkan.device);
             return Err(error);
         }
+        #[cfg(target_os = "windows")]
+        drop(semaphore_handle);
         self.import_buffer_to_cuda_inner(
             context,
             width,
@@ -867,26 +914,58 @@ impl GeneratedGpuRenderer {
         buffer: ExportedBuffer,
         wait: Option<PendingVulkanWait>,
     ) -> Result<ImportedVulkanFrame, String> {
-        let fd_info = vk::MemoryGetFdInfoKHR::default()
-            .memory(buffer.memory)
-            .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
-        let fd = match unsafe { self.external_memory_fd.get_memory_fd(&fd_info) } {
-            Ok(fd) => fd,
-            Err(error) => {
-                cleanup_failed_wait(&self.vulkan.device, &context, wait.as_ref());
-                return Err(format!("export Vulkan generated memory fd: {error:?}"));
+        #[cfg(target_os = "linux")]
+        let memory_handle = {
+            let fd_info = vk::MemoryGetFdInfoKHR::default()
+                .memory(buffer.memory)
+                .handle_type(external_memory_handle_type());
+            match unsafe { self.external_memory.get_memory_fd(&fd_info) } {
+                Ok(fd) => fd,
+                Err(error) => {
+                    cleanup_failed_wait(&self.vulkan.device, &context, wait.as_ref());
+                    return Err(format!("export Vulkan generated memory fd: {error:?}"));
+                }
+            }
+        };
+        #[cfg(target_os = "windows")]
+        let memory_handle = {
+            let handle_info = vk::MemoryGetWin32HandleInfoKHR::default()
+                .memory(buffer.memory)
+                .handle_type(external_memory_handle_type());
+            match unsafe { self.external_memory.get_memory_win32_handle(&handle_info) } {
+                Ok(handle) => unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) },
+                Err(error) => {
+                    cleanup_failed_wait(&self.vulkan.device, &context, wait.as_ref());
+                    return Err(format!("export Vulkan generated memory handle: {error:?}"));
+                }
             }
         };
         if let Err(error) = bind_context(&context, "bind CUDA context for Vulkan generated import")
         {
-            unsafe { libc::close(fd) };
+            #[cfg(target_os = "linux")]
+            unsafe {
+                libc::close(memory_handle)
+            };
             cleanup_failed_wait(&self.vulkan.device, &context, wait.as_ref());
             return Err(error);
         }
         let mut external_memory = ptr::null_mut();
-        let handle = sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 { fd };
+        #[cfg(target_os = "linux")]
+        let handle = sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 {
+            fd: memory_handle,
+        };
+        #[cfg(target_os = "windows")]
+        let handle = sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 {
+            win32: sys::CUDA_EXTERNAL_HANDLE_DESC_WIN32 {
+                handle: memory_handle.as_raw_handle().cast(),
+                name: ptr::null(),
+            },
+        };
         let memory_desc = sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC {
+            #[cfg(target_os = "linux")]
             type_: sys::CUexternalMemoryHandleType_enum_CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+            #[cfg(target_os = "windows")]
+            type_: sys::CUexternalMemoryHandleType_enum_CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32,
             handle,
             size: buffer.allocation_size,
             flags: 0,
@@ -896,12 +975,15 @@ impl GeneratedGpuRenderer {
             unsafe { sys::cuImportExternalMemory(&mut external_memory, &memory_desc) },
             "cuImportExternalMemory",
         ) {
+            #[cfg(target_os = "linux")]
             unsafe {
-                libc::close(fd);
+                libc::close(memory_handle);
             }
             cleanup_failed_wait(&self.vulkan.device, &context, wait.as_ref());
             return Err(error);
         }
+        #[cfg(target_os = "windows")]
+        drop(memory_handle);
         let mut ptr = 0;
         let buffer_desc = sys::CUDA_EXTERNAL_MEMORY_BUFFER_DESC {
             offset: 0,
@@ -1440,7 +1522,7 @@ fn make_skia_context(
             &[],
             &[
                 "VK_KHR_external_memory",
-                extension_name(ash::khr::external_memory_fd::NAME),
+                extension_name(external_memory_extension_name()),
             ],
         )
         .build()
@@ -1451,4 +1533,44 @@ fn make_skia_context(
 
 fn extension_name(name: &'static CStr) -> &'static str {
     name.to_str().unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn external_memory_handle_type() -> vk::ExternalMemoryHandleTypeFlags {
+    vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD
+}
+
+#[cfg(target_os = "windows")]
+fn external_memory_handle_type() -> vk::ExternalMemoryHandleTypeFlags {
+    vk::ExternalMemoryHandleTypeFlags::OPAQUE_WIN32
+}
+
+#[cfg(target_os = "linux")]
+fn external_semaphore_handle_type() -> vk::ExternalSemaphoreHandleTypeFlags {
+    vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD
+}
+
+#[cfg(target_os = "windows")]
+fn external_semaphore_handle_type() -> vk::ExternalSemaphoreHandleTypeFlags {
+    vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_WIN32
+}
+
+#[cfg(target_os = "linux")]
+fn external_memory_extension_name() -> &'static CStr {
+    ash::khr::external_memory_fd::NAME
+}
+
+#[cfg(target_os = "windows")]
+fn external_memory_extension_name() -> &'static CStr {
+    ash::khr::external_memory_win32::NAME
+}
+
+#[cfg(target_os = "linux")]
+fn external_semaphore_extension_name() -> &'static CStr {
+    ash::khr::external_semaphore_fd::NAME
+}
+
+#[cfg(target_os = "windows")]
+fn external_semaphore_extension_name() -> &'static CStr {
+    ash::khr::external_semaphore_win32::NAME
 }

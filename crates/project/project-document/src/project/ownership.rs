@@ -9,6 +9,14 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 #[cfg(unix)]
 use std::time::Duration;
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 const LOCK_ACQUIRE_ATTEMPTS: usize = 8;
 const PROCESS_STOP_WAIT_ATTEMPTS: usize = 20;
@@ -226,7 +234,30 @@ fn checked_pid(pid: u32) -> Option<i32> {
     i32::try_from(pid).ok().filter(|pid| *pid > 0)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    if checked_pid(pid).is_none() {
+        return false;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return matches!(
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .and_then(|code| u32::try_from(code).ok()),
+            Some(ERROR_ACCESS_DENIED)
+        );
+    }
+    let mut exit_code = 0;
+    let running = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0
+        && exit_code == STILL_ACTIVE as u32;
+    unsafe {
+        CloseHandle(handle);
+    }
+    running
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn process_is_running(_pid: u32) -> bool {
     false
 }

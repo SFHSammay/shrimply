@@ -50,10 +50,19 @@ def send(sock: socket.socket, value: Message) -> None:
     sock.sendall(struct.pack(">I", len(encoded)) + encoded)
 
 
+def connect(args: WorkerArguments) -> socket.socket:
+    if args.socket is not None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(args.socket)
+        return sock
+    if args.tcp_host is not None and args.tcp_port is not None:
+        return socket.create_connection((args.tcp_host, args.tcp_port))
+    raise ValueError("Manim worker requires either --socket or --tcp-host/--tcp-port")
+
+
 def run(args: WorkerArguments) -> None:
     fps = Fraction(args.fps)
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(args.socket)
+    sock = connect(args)
     try:
         parameters = receive_parameters(sock)
         send(
@@ -148,7 +157,9 @@ def run(args: WorkerArguments) -> None:
 @app.default
 def main(
     *,
-    socket: str,
+    socket: str | None = None,
+    tcp_host: str | None = None,
+    tcp_port: int | None = None,
     source: Path,
     width: int,
     height: int,
@@ -158,6 +169,8 @@ def main(
     run(
         WorkerArguments(
             socket=socket,
+            tcp_host=tcp_host,
+            tcp_port=tcp_port,
             source=source,
             scene=scene,
             width=width,

@@ -1,13 +1,21 @@
 use crate::{CudaContext, CudaStream, sys};
 use std::{
-    os::fd::{IntoRawFd, OwnedFd},
     ptr,
     sync::Arc,
 };
+#[cfg(target_os = "linux")]
+use std::os::fd::{IntoRawFd, OwnedFd};
+#[cfg(target_os = "windows")]
+use std::os::windows::io::{AsRawHandle, OwnedHandle};
+
+#[cfg(target_os = "linux")]
+pub type ExternalHandle = OwnedFd;
+#[cfg(target_os = "windows")]
+pub type ExternalHandle = OwnedHandle;
 
 pub struct ImageDescriptor {
-    pub fd: OwnedFd,
-    pub semaphore_fd: OwnedFd,
+    pub handle: ExternalHandle,
+    pub semaphore_handle: ExternalHandle,
     pub allocation_size: u64,
     pub width: u32,
     pub height: u32,
@@ -42,11 +50,27 @@ impl ImportedImage {
         exported: ImageDescriptor,
     ) -> Result<Self, String> {
         bind_context(&context, "bind CUDA context for external import")?;
-        let fd = exported.fd.into_raw_fd();
+        #[cfg(target_os = "linux")]
+        let memory_handle = exported.handle.into_raw_fd();
+        #[cfg(target_os = "windows")]
+        let memory_handle = exported.handle.as_raw_handle();
         let mut external_memory = ptr::null_mut();
         let memory_desc = sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC {
+            #[cfg(target_os = "linux")]
             type_: sys::CUexternalMemoryHandleType_enum_CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
-            handle: sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 { fd },
+            #[cfg(target_os = "windows")]
+            type_: sys::CUexternalMemoryHandleType_enum_CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32,
+            #[cfg(target_os = "linux")]
+            handle: sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 {
+                fd: memory_handle,
+            },
+            #[cfg(target_os = "windows")]
+            handle: sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 {
+                win32: sys::CUDA_EXTERNAL_HANDLE_DESC_WIN32 {
+                    handle: memory_handle.cast(),
+                    name: ptr::null(),
+                },
+            },
             size: exported.allocation_size,
             flags: sys::CUDA_EXTERNAL_MEMORY_DEDICATED,
             reserved: [0; 16],
@@ -55,9 +79,12 @@ impl ImportedImage {
             unsafe { sys::cuImportExternalMemory(&mut external_memory, &memory_desc) },
             "cuImportExternalMemory for external",
         ) {
-            unsafe { libc::close(fd) };
+            #[cfg(target_os = "linux")]
+            unsafe { libc::close(memory_handle) };
             return Err(error);
         }
+        #[cfg(target_os = "windows")]
+        drop(exported.handle);
         let mut mipmapped_array = ptr::null_mut();
         let mipmapped_desc = sys::CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC {
             offset: 0,
@@ -113,12 +140,26 @@ impl ImportedImage {
             }
             return Err(error);
         }
-        let semaphore_fd = exported.semaphore_fd.into_raw_fd();
+        #[cfg(target_os = "linux")]
+        let semaphore_handle = exported.semaphore_handle.into_raw_fd();
+        #[cfg(target_os = "windows")]
+        let semaphore_handle = exported.semaphore_handle.as_raw_handle();
         let mut external_semaphore = ptr::null_mut();
         let semaphore_desc = sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC {
+        #[cfg(target_os = "linux")]
         type_: sys::CUexternalSemaphoreHandleType_enum_CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD,
+        #[cfg(target_os = "windows")]
+        type_: sys::CUexternalSemaphoreHandleType_enum_CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_WIN32,
+        #[cfg(target_os = "linux")]
         handle: sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC_st__bindgen_ty_1 {
-            fd: semaphore_fd,
+            fd: semaphore_handle,
+        },
+        #[cfg(target_os = "windows")]
+        handle: sys::CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC_st__bindgen_ty_1 {
+            win32: sys::CUDA_EXTERNAL_HANDLE_DESC_WIN32 {
+                handle: semaphore_handle.cast(),
+                name: ptr::null(),
+            },
         },
         flags: 0,
         reserved: [0; 16],
@@ -127,7 +168,8 @@ impl ImportedImage {
             unsafe { sys::cuImportExternalSemaphore(&mut external_semaphore, &semaphore_desc) },
             "cuImportExternalSemaphore for external",
         ) {
-            unsafe { libc::close(semaphore_fd) };
+            #[cfg(target_os = "linux")]
+            unsafe { libc::close(semaphore_handle) };
             if cuda_check(
                 unsafe { sys::cuMipmappedArrayDestroy(mipmapped_array) },
                 "cuMipmappedArrayDestroy after external semaphore import failure",
@@ -144,6 +186,8 @@ impl ImportedImage {
             }
             return Err(error);
         }
+        #[cfg(target_os = "windows")]
+        drop(exported.semaphore_handle);
         Ok(Self {
             context,
             mipmapped_array,

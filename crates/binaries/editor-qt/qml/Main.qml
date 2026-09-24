@@ -4,8 +4,10 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 import QtQml.Models
+import Qt.labs.qmlmodels
 import dev.shrimply.editor
 import dev.shrimply.export
+import dev.shrimply.preferences
 import dev.shrimply.inspector
 
 ApplicationWindow {
@@ -38,6 +40,45 @@ ApplicationWindow {
             fullscreenPreview = false
             visibility = visibilityBeforeFullscreen
         }
+    }
+
+    function bundledIcon(name) {
+        if (Qt.platform.os !== "windows")
+            return ""
+        switch (name) {
+        case "task-complete": return "qrc:/qt/qml/dev/shrimply/components/icons/check-plain-symbolic.svg"
+        case "show-guides": return "qrc:/qt/qml/dev/shrimply/components/icons/ruler-angled-symbolic.svg"
+        case "draw-freehand": return "qrc:/qt/qml/dev/shrimply/components/icons/pencil-symbolic.svg"
+        case "fill-color": return "qrc:/qt/qml/dev/shrimply/components/icons/fill-tool-symbolic.svg"
+        case "transform-move": return "qrc:/qt/qml/dev/shrimply/components/icons/move-tool-symbolic.svg"
+        case "draw-eraser": return "qrc:/qt/qml/dev/shrimply/components/icons/eraser-symbolic.svg"
+        case "media-seek-backward": return "qrc:/qt/qml/dev/shrimply/components/icons/previous.svg"
+        case "media-seek-forward": return "qrc:/qt/qml/dev/shrimply/components/icons/next.svg"
+        case "view-restore": return "qrc:/qt/qml/dev/shrimply/components/icons/four-arrows-pointing-inward-symbolic.svg"
+        case "view-fullscreen": return "qrc:/qt/qml/dev/shrimply/components/icons/four-arrows-pointing-outward-symbolic.svg"
+        case "snap": return "qrc:/qt/qml/dev/shrimply/components/icons/magnet-tilted-symbolic.svg"
+        case "view-grid": return "qrc:/qt/qml/dev/shrimply/components/icons/sliders-horizontal-symbolic.svg"
+        case "edit-select": return "qrc:/qt/qml/dev/shrimply/components/icons/select-symbolic.svg"
+        case "edit-cut": return "qrc:/qt/qml/dev/shrimply/components/icons/cut-symbolic.svg"
+        case "timeline-mode-overwrite": return "qrc:/qt/qml/dev/shrimply/components/icons/track-insert-symbolic.svg"
+        case "dialog-cancel": return "qrc:/qt/qml/dev/shrimply/components/icons/track-block-symbolic.svg"
+        case "selection-move-to-layer-above": return "qrc:/qt/qml/dev/shrimply/components/icons/track-move-above-symbolic.svg"
+        default: return ""
+        }
+    }
+
+    function iconName(name) {
+        return bundledIcon(name).length === 0 ? name : ""
+    }
+
+    function iconSource(name) {
+        return bundledIcon(name)
+    }
+
+    function iconColor(name, enabled) {
+        if (bundledIcon(name).length === 0)
+            return "transparent"
+        return enabled ? palette.buttonText : palette.mid
     }
 
     onVisibilityChanged: {
@@ -324,10 +365,15 @@ ApplicationWindow {
                                 ToolButton {
                                     id: previewStatusButton
                                     Layout.alignment: Qt.AlignHCenter
-                                    icon.name: "task-complete"
+                                    icon.name: window.iconName("task-complete")
+                                    icon.source: window.iconSource("task-complete")
+                                    icon.color: window.iconColor("task-complete", enabled)
                                     text: backend.translate("Ready")
                                     display: AbstractButton.IconOnly
                                     enabled: false
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: text
+                                    Accessible.name: text
                                 }
                                 Label {
                                     Layout.fillWidth: true
@@ -354,18 +400,71 @@ ApplicationWindow {
                                     HoverHandler { id: speedHover }
                                 }
                                 ToolButton {
-                                    icon.name: "show-guides"
+                                    icon.name: window.iconName("show-guides")
+                                    icon.source: window.iconSource("show-guides")
+                                    icon.color: window.iconColor("show-guides", enabled)
                                     text: backend.translate("Guides")
                                     display: AbstractButton.IconOnly
                                     checkable: true
                                     checked: previewLoader.item ? previewLoader.item.guidesVisible : false
                                     onClicked: if (previewLoader.item) previewLoader.item.guidesVisible = checked
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: text
+                                    Accessible.name: text
                                 }
                                 ToolSeparator {}
-                                ToolButton { icon.name: "draw-freehand"; text: backend.translate("Pen"); display: AbstractButton.IconOnly }
-                                ToolButton { icon.name: "fill-color"; text: backend.translate("Fill"); display: AbstractButton.IconOnly }
-                                ToolButton { icon.name: "transform-move"; text: backend.translate("Transform"); display: AbstractButton.IconOnly }
-                                ToolButton { icon.name: "draw-eraser"; text: backend.translate("Eraser"); display: AbstractButton.IconOnly }
+                                ToolButton {
+                                    icon.name: window.iconName("draw-freehand")
+                                    icon.source: window.iconSource("draw-freehand")
+                                    icon.color: window.iconColor("draw-freehand", enabled)
+                                    text: backend.translate("Pen")
+                                    display: AbstractButton.IconOnly
+                                    checkable: true
+                                    Binding on checked { value: previewLoader.item ? previewLoader.item.penToolActive : false }
+                                    onClicked: if (checked && previewLoader.item) previewLoader.item.selectPenTool()
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: text
+                                    Accessible.name: text
+                                }
+                                ToolButton {
+                                    icon.name: window.iconName("fill-color")
+                                    icon.source: window.iconSource("fill-color")
+                                    icon.color: window.iconColor("fill-color", enabled)
+                                    text: backend.translate("Fill")
+                                    display: AbstractButton.IconOnly
+                                    checkable: true
+                                    Binding on checked { value: previewLoader.item ? previewLoader.item.fillToolActive : false }
+                                    onClicked: if (checked && previewLoader.item) previewLoader.item.selectFillTool()
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: text
+                                    Accessible.name: text
+                                }
+                                ToolButton {
+                                    icon.name: window.iconName("transform-move")
+                                    icon.source: window.iconSource("transform-move")
+                                    icon.color: window.iconColor("transform-move", enabled)
+                                    text: backend.translate("Transform")
+                                    display: AbstractButton.IconOnly
+                                    checkable: true
+                                    Binding on checked { value: previewLoader.item ? previewLoader.item.transformToolActive : false }
+                                    onClicked: if (checked && previewLoader.item) previewLoader.item.selectTransformTool()
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: text
+                                    Accessible.name: text
+                                }
+                                ToolButton {
+                                    icon.name: window.iconName("draw-eraser")
+                                    icon.source: window.iconSource("draw-eraser")
+                                    icon.color: window.iconColor("draw-eraser", enabled)
+                                    text: backend.translate("Eraser")
+                                    display: AbstractButton.IconOnly
+                                    checkable: true
+                                    Binding on checked { value: previewLoader.item ? previewLoader.item.eraserToolActive : false }
+                                    onClicked: if (previewLoader.item) previewLoader.item.eraserToolActive = checked
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: text
+                                    Accessible.name: text
+                                }
                             }
                         }
 
@@ -391,12 +490,37 @@ ApplicationWindow {
                             anchors.leftMargin: 8
                             anchors.rightMargin: 8
 
-                            ToolButton { icon.name: "media-seek-backward"; onClicked: backend.stepFrame(-1) }
+                            ToolButton {
+                                icon.name: window.iconName("media-seek-backward")
+                                icon.source: window.iconSource("media-seek-backward")
+                                icon.color: window.iconColor("media-seek-backward", enabled)
+                                text: backend.translate("Step back one frame")
+                                display: AbstractButton.IconOnly
+                                onClicked: backend.stepFrame(-1)
+                                ToolTip.visible: hovered
+                                ToolTip.text: text
+                                Accessible.name: text
+                            }
                             ToolButton {
                                 icon.name: backend.playing ? "media-playback-pause" : "media-playback-start"
+                                text: backend.playing ? backend.translate("Pause") : backend.translate("Play")
+                                display: AbstractButton.IconOnly
                                 onClicked: backend.togglePlaying()
+                                ToolTip.visible: hovered
+                                ToolTip.text: text
+                                Accessible.name: text
                             }
-                            ToolButton { icon.name: "media-seek-forward"; onClicked: backend.stepFrame(1) }
+                            ToolButton {
+                                icon.name: window.iconName("media-seek-forward")
+                                icon.source: window.iconSource("media-seek-forward")
+                                icon.color: window.iconColor("media-seek-forward", enabled)
+                                text: backend.translate("Step forward one frame")
+                                display: AbstractButton.IconOnly
+                                onClicked: backend.stepFrame(1)
+                                ToolTip.visible: hovered
+                                ToolTip.text: text
+                                Accessible.name: text
+                            }
                             Slider {
                                 Layout.fillWidth: true
                                 from: 0
@@ -409,10 +533,15 @@ ApplicationWindow {
                                 font.family: backend.fixedFontFamily
                             }
                             ToolButton {
-                                icon.name: window.fullscreenPreview ? "view-restore" : "view-fullscreen"
+                                icon.name: window.iconName(window.fullscreenPreview ? "view-restore" : "view-fullscreen")
+                                icon.source: window.iconSource(window.fullscreenPreview ? "view-restore" : "view-fullscreen")
+                                icon.color: window.iconColor(window.fullscreenPreview ? "view-restore" : "view-fullscreen", enabled)
                                 text: window.fullscreenPreview ? backend.translate("Exit Fullscreen Preview") : backend.translate("Fullscreen Preview")
                                 display: AbstractButton.IconOnly
                                 onClicked: window.setPreviewFullscreen(!window.fullscreenPreview)
+                                ToolTip.visible: hovered
+                                ToolTip.text: text
+                                Accessible.name: text
                             }
                         }
                     }
@@ -437,24 +566,36 @@ ApplicationWindow {
                         anchors.top: parent.top
                         anchors.horizontalCenter: parent.horizontalCenter
                         ToolButton {
-                            icon.name: "snap"
+                            icon.name: window.iconName("snap")
+                            icon.source: window.iconSource("snap")
+                            icon.color: window.iconColor("snap", enabled)
                             text: backend.translate("Magnet")
                             display: AbstractButton.IconOnly
                             checkable: true
                             Binding on checked { value: timelineLoader.item ? timelineLoader.item.magnetEnabled : false }
                             onClicked: if (timelineLoader.item) timelineLoader.item.magnetEnabled = checked
+                            ToolTip.visible: hovered
+                            ToolTip.text: text
+                            Accessible.name: text
                         }
                         ToolButton {
-                            icon.name: "view-grid"
+                            icon.name: window.iconName("view-grid")
+                            icon.source: window.iconSource("view-grid")
+                            icon.color: window.iconColor("view-grid", enabled)
                             text: backend.translate("Beat Grid")
                             display: AbstractButton.IconOnly
                             checkable: true
                             Binding on checked { value: timelineLoader.item ? timelineLoader.item.beatGridEnabled : false }
                             onClicked: if (timelineLoader.item) timelineLoader.item.beatGridEnabled = checked
+                            ToolTip.visible: hovered
+                            ToolTip.text: text
+                            Accessible.name: text
                         }
                         ToolSeparator {}
                         ToolButton {
-                            icon.name: "edit-select"
+                            icon.name: window.iconName("edit-select")
+                            icon.source: window.iconSource("edit-select")
+                            icon.color: window.iconColor("edit-select", enabled)
                             text: backend.translate("Pointer")
                             display: AbstractButton.IconOnly
                             checkable: true
@@ -463,9 +604,14 @@ ApplicationWindow {
                             }
                             onClicked: if (checked && timelineLoader.item)
                                 timelineLoader.item.cutEnabled = false
+                            ToolTip.visible: hovered
+                            ToolTip.text: text
+                            Accessible.name: text
                         }
                         ToolButton {
-                            icon.name: "edit-cut"
+                            icon.name: window.iconName("edit-cut")
+                            icon.source: window.iconSource("edit-cut")
+                            icon.color: window.iconColor("edit-cut", enabled)
                             text: backend.translate("Cut")
                             display: AbstractButton.IconOnly
                             checkable: true
@@ -474,10 +620,15 @@ ApplicationWindow {
                             }
                             onClicked: if (checked && timelineLoader.item)
                                 timelineLoader.item.cutEnabled = true
+                            ToolTip.visible: hovered
+                            ToolTip.text: text
+                            Accessible.name: text
                         }
                         ToolSeparator {}
                         ToolButton {
-                            icon.name: "timeline-mode-overwrite"
+                            icon.name: window.iconName("timeline-mode-overwrite")
+                            icon.source: window.iconSource("timeline-mode-overwrite")
+                            icon.color: window.iconColor("timeline-mode-overwrite", enabled)
                             text: backend.translate("Overwrite/Insert")
                             display: AbstractButton.IconOnly
                             checkable: true
@@ -486,9 +637,14 @@ ApplicationWindow {
                             }
                             onClicked: if (checked && timelineLoader.item)
                                 timelineLoader.item.selectOverwriteMode()
+                            ToolTip.visible: hovered
+                            ToolTip.text: text
+                            Accessible.name: text
                         }
                         ToolButton {
-                            icon.name: "dialog-cancel"
+                            icon.name: window.iconName("dialog-cancel")
+                            icon.source: window.iconSource("dialog-cancel")
+                            icon.color: window.iconColor("dialog-cancel", enabled)
                             text: backend.translate("Block")
                             display: AbstractButton.IconOnly
                             checkable: true
@@ -497,9 +653,14 @@ ApplicationWindow {
                             }
                             onClicked: if (checked && timelineLoader.item)
                                 timelineLoader.item.selectBlockMode()
+                            ToolTip.visible: hovered
+                            ToolTip.text: text
+                            Accessible.name: text
                         }
                         ToolButton {
-                            icon.name: "selection-move-to-layer-above"
+                            icon.name: window.iconName("selection-move-to-layer-above")
+                            icon.source: window.iconSource("selection-move-to-layer-above")
+                            icon.color: window.iconColor("selection-move-to-layer-above", enabled)
                             text: backend.translate("New Track")
                             display: AbstractButton.IconOnly
                             checkable: true
@@ -508,6 +669,9 @@ ApplicationWindow {
                             }
                             onClicked: if (checked && timelineLoader.item)
                                 timelineLoader.item.selectNewTrackMode()
+                            ToolTip.visible: hovered
+                            ToolTip.text: text
+                            Accessible.name: text
                         }
                     }
                 }

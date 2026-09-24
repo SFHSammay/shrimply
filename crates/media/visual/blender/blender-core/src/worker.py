@@ -346,10 +346,19 @@ def run(sock: socket.socket) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--socket", required=True)
+    parser.add_argument("--socket")
+    parser.add_argument("--tcp-host")
+    parser.add_argument("--tcp-port", type=int)
     args = parser.parse_args(arguments)
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(args.socket)
+    if (args.tcp_host is None) != (args.tcp_port is None):
+        parser.error("--tcp-host and --tcp-port must be provided together")
+    if args.tcp_host is not None:
+        sock = socket.create_connection((args.tcp_host, args.tcp_port))
+    else:
+        if args.socket is None:
+            parser.error("--socket is required unless --tcp-host and --tcp-port are provided")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(args.socket)
     try:
         run(sock)
     except Exception:

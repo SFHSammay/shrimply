@@ -1,5 +1,6 @@
 mod preview;
 mod renderer;
+#[cfg(target_os = "linux")]
 mod system_cursor;
 
 pub use preview::ToolkitPreview;
@@ -24,9 +25,15 @@ use shrimply_visual_cuda::gpu::CompositedVideoFrame;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+#[cfg(target_os = "windows")]
+mod timeline_windows;
+
 use shrimply_cross_ui_core::editor::EditorSession;
 use shrimply_math_color::Color;
+#[cfg(not(target_os = "windows"))]
 use shrimply_timeline_gtk::{RenderedVideoFrame, ToolkitPointerButton, ToolkitTimeline};
+#[cfg(target_os = "windows")]
+use timeline_windows::{RenderedVideoFrame, ToolkitPointerButton, ToolkitTimeline};
 use shrimply_timeline_qt::{
     ContextMenuControl, ContextMenuRequest, CursorTool, DragCollisionMode,
     TIMELINE_CLIPBOARD_MARKER,
@@ -506,6 +513,7 @@ pub extern "C" fn shrimply_qt_timeline_pointer_release(
 ///
 /// The pointers must be valid Wayland display, surface, and seat handles for the duration of the
 /// call.
+#[cfg(target_os = "linux")]
 pub unsafe extern "C" fn shrimply_qt_timeline_begin_pointer_lock(
     display: *mut c_void,
     surface: *mut c_void,
@@ -521,6 +529,16 @@ pub unsafe extern "C" fn shrimply_qt_timeline_begin_pointer_lock(
                 .begin_pointer_lock(display, surface, seat, system_cursor::grabbing())
         }
     })
+}
+
+#[unsafe(no_mangle)]
+#[cfg(not(target_os = "linux"))]
+pub extern "C" fn shrimply_qt_timeline_begin_pointer_lock(
+    _display: *mut c_void,
+    _surface: *mut c_void,
+    _seat: *mut c_void,
+) -> bool {
+    false
 }
 
 #[unsafe(no_mangle)]
@@ -1121,6 +1139,78 @@ pub extern "C" fn shrimply_qt_preview_set_guides_visible(visible: bool) {
     SURFACES.with_borrow(|surfaces| {
         if let Some(surfaces) = surfaces.as_ref() {
             surfaces.preview.set_guides_visible(visible);
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shrimply_qt_preview_pen_tool_active() -> bool {
+    SURFACES.with_borrow(|surfaces| {
+        surfaces
+            .as_ref()
+            .is_some_and(|surfaces| surfaces.preview.pen_tool_active())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shrimply_qt_preview_fill_tool_active() -> bool {
+    SURFACES.with_borrow(|surfaces| {
+        surfaces
+            .as_ref()
+            .is_some_and(|surfaces| surfaces.preview.fill_tool_active())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shrimply_qt_preview_transform_tool_active() -> bool {
+    SURFACES.with_borrow(|surfaces| {
+        surfaces
+            .as_ref()
+            .is_some_and(|surfaces| surfaces.preview.transform_tool_active())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shrimply_qt_preview_eraser_tool_active() -> bool {
+    SURFACES.with_borrow(|surfaces| {
+        surfaces
+            .as_ref()
+            .is_some_and(|surfaces| surfaces.preview.eraser_tool_active())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shrimply_qt_preview_select_pen_tool() {
+    SURFACES.with_borrow_mut(|surfaces| {
+        if let Some(surfaces) = surfaces.as_mut() {
+            surfaces.preview.select_pen_tool();
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shrimply_qt_preview_select_fill_tool() {
+    SURFACES.with_borrow_mut(|surfaces| {
+        if let Some(surfaces) = surfaces.as_mut() {
+            surfaces.preview.select_fill_tool();
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shrimply_qt_preview_select_transform_tool() {
+    SURFACES.with_borrow_mut(|surfaces| {
+        if let Some(surfaces) = surfaces.as_mut() {
+            surfaces.preview.select_transform_tool();
+        }
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shrimply_qt_preview_set_eraser_tool_active(active: bool) {
+    SURFACES.with_borrow_mut(|surfaces| {
+        if let Some(surfaces) = surfaces.as_mut() {
+            surfaces.preview.set_eraser_tool_active(active);
         }
     });
 }

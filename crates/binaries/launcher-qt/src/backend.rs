@@ -160,9 +160,6 @@ impl cxx_qt::Initialize for qobject::LauncherBackend {
             recent_count = self.recent_count(),
             preset_count = self.preset_count(),
             frame_rate_count = self.frame_rate_count(),
-            first_recent = %self.recent_name(0),
-            first_preset = %self.preset_label(0),
-            first_frame_rate = %self.frame_rate_label(0),
             "Qt launcher models initialized"
         );
     }

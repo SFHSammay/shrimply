@@ -1,11 +1,18 @@
 use hashbrown::HashMap;
+#[cfg(unix)]
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(target_os = "windows")]
+use std::net::{TcpListener as WorkerListener, TcpStream as WorkerStream};
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener as WorkerListener, UnixStream as WorkerStream};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,6 +32,7 @@ const COMPILE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const PROGRESS_LOG_FRAME_INTERVAL: u64 = 30;
 const MAX_IR_PACKET_BYTES: usize = 256 * 1024 * 1024;
+#[cfg(unix)]
 static NEXT_SOCKET: AtomicU64 = AtomicU64::new(1);
 type SceneCache = HashMap<AssetSnapshot, Result<Vec<String>, String>>;
 static SCENE_CACHE: OnceLock<Mutex<SceneCache>> = OnceLock::new();
@@ -41,11 +49,52 @@ struct WorkerDescription {
     scene: String,
 }
 
+#[cfg(unix)]
 struct SocketPath(PathBuf);
 
+#[cfg(unix)]
 impl Drop for SocketPath {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
+    }
+}
+
+struct WorkerConnection {
+    listener: WorkerListener,
+    #[cfg(unix)]
+    socket_path: PathBuf,
+    #[cfg(unix)]
+    _socket_path: SocketPath,
+    #[cfg(target_os = "windows")]
+    tcp_port: u16,
+}
+
+fn bind_worker_connection() -> Result<WorkerConnection, String> {
+    #[cfg(unix)]
+    {
+        let socket_path = std::env::temp_dir().join(format!(
+            "shrimply-manim-ir-{}-{}.sock",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_file(&socket_path);
+        let listener = WorkerListener::bind(&socket_path)
+            .map_err(|error| format!("create Manim IR worker socket: {error}"))?;
+        return Ok(WorkerConnection {
+            listener,
+            socket_path: socket_path.clone(),
+            _socket_path: SocketPath(socket_path),
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let listener = WorkerListener::bind(("127.0.0.1", 0))
+            .map_err(|error| format!("create Manim IR worker TCP listener: {error}"))?;
+        let tcp_port = listener
+            .local_addr()
+            .map_err(|error| format!("inspect Manim IR worker TCP listener: {error}"))?
+            .port();
+        return Ok(WorkerConnection { listener, tcp_port });
     }
 }
 
@@ -63,7 +112,7 @@ fn check_compile_state(cancelled: &AtomicBool, started: Instant) -> Result<(), S
 }
 
 fn read_exact_cancelled(
-    socket: &mut UnixStream,
+    socket: &mut WorkerStream,
     bytes: &mut [u8],
     cancelled: &AtomicBool,
     started: Instant,
@@ -89,7 +138,7 @@ fn read_exact_cancelled(
 }
 
 fn write_all_cancelled(
-    socket: &mut UnixStream,
+    socket: &mut WorkerStream,
     bytes: &[u8],
     cancelled: &AtomicBool,
     started: Instant,
@@ -112,11 +161,11 @@ fn write_all_cancelled(
 }
 
 fn accept_worker(
-    listener: &UnixListener,
+    listener: &WorkerListener,
     child: &mut WorkerHandle,
     cancelled: &AtomicBool,
     started: Instant,
-) -> Result<UnixStream, String> {
+) -> Result<WorkerStream, String> {
     let socket = loop {
         check_compile_state(cancelled, started)?;
         match listener.accept() {
@@ -142,7 +191,7 @@ fn accept_worker(
 }
 
 fn read_packet(
-    socket: &mut UnixStream,
+    socket: &mut WorkerStream,
     cancelled: &AtomicBool,
     started: Instant,
 ) -> Result<shrimply_manim_ir::Packet, String> {
@@ -171,7 +220,7 @@ fn read_packet(
 }
 
 fn send_parameters(
-    socket: &mut UnixStream,
+    socket: &mut WorkerStream,
     parameters: &HashMap<String, ManimParameterValue>,
     cancelled: &AtomicBool,
     started: Instant,
@@ -249,13 +298,21 @@ fn python_command(module: &str) -> Result<(Command, bool), String> {
 impl WorkerHandle {
     fn spawn(
         settings: &Settings,
-        worker_socket: &Path,
+        worker: &WorkerConnection,
         source: &Path,
     ) -> Result<(Self, bool), String> {
         let (mut command, environment_ready) = python_command("ir_worker")?;
-        let child = command
+        #[cfg(unix)]
+        command
             .arg("--socket")
-            .arg(worker_socket)
+            .arg(&worker.socket_path);
+        #[cfg(target_os = "windows")]
+        command
+            .arg("--tcp-host")
+            .arg("127.0.0.1")
+            .arg("--tcp-port")
+            .arg(worker.tcp_port.to_string());
+        command
             .arg("--source")
             .arg(source)
             .arg("--scene")
@@ -268,8 +325,10 @@ impl WorkerHandle {
             .arg(settings.fps.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .process_group(0)
+            .stderr(Stdio::inherit());
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command
             .spawn()
             .map_err(|error| format!("start one-shot Manim compiler with uv: {error}"))?;
         let id = child.id();
@@ -309,6 +368,8 @@ impl WorkerHandle {
     fn stop(&mut self) {
         if self.active {
             let id = self.child.id();
+            #[cfg(unix)]
+            {
             let process_group = i32::try_from(id).expect("Manim compiler PID exceeds i32");
             let killed = unsafe { libc::kill(-process_group, libc::SIGKILL) };
             let error = std::io::Error::last_os_error();
@@ -321,6 +382,11 @@ impl WorkerHandle {
                     "could not stop Manim compiler process group",
                 );
                 std::process::abort();
+            }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = self.child.kill();
             }
             let result = self.child.wait();
             self.active = false;
@@ -472,16 +538,9 @@ pub fn compile(
         return Ok(animation);
     }
     source.read()?;
-    let socket_path = std::env::temp_dir().join(format!(
-        "shrimply-manim-ir-{}-{}.sock",
-        std::process::id(),
-        NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)
-        .map_err(|error| format!("create Manim IR worker socket: {error}"))?;
-    let _socket_path = SocketPath(socket_path.clone());
-    listener
+    let worker_connection = bind_worker_connection()?;
+    worker_connection
+        .listener
         .set_nonblocking(true)
         .map_err(|error| format!("configure Manim IR listener: {error}"))?;
     let started = Instant::now();
@@ -493,7 +552,7 @@ pub fn compile(
         "Manim compilation started",
     );
     let (mut child, environment_ready) =
-        WorkerHandle::spawn(settings, &socket_path, source.path())?;
+        WorkerHandle::spawn(settings, &worker_connection, source.path())?;
     if !environment_ready {
         on_progress(Progress {
             stage: ProgressStage::PreparingEnvironment,
@@ -501,7 +560,7 @@ pub fn compile(
             total: 0,
         });
     }
-    let mut socket = accept_worker(&listener, &mut child, cancelled, started)?;
+    let mut socket = accept_worker(&worker_connection.listener, &mut child, cancelled, started)?;
     send_parameters(&mut socket, &settings.parameters, cancelled, started)?;
     let mut builder = shrimply_manim_ir::CompiledAnimationBuilder::new();
     let mut progress_stage = None;

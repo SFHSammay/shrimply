@@ -1,20 +1,20 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::{env, fs, path::PathBuf, process::Command};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use shrimply_slang_build::{Compiler, Target};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const DEFAULT_CUBIN_TARGET: &str = "sm_86";
-#[cfg(target_os = "linux")]
-const DEFAULT_PTX_TARGET: &str = "compute_50";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const DEFAULT_PTX_TARGET: &str = "compute_75";
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const MODULES: &str = include_str!("../render-core/shaders/kernels.txt");
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {}
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn main() {
     for variable in [
         "CUDA_IMAGE_FORMAT",
@@ -24,10 +24,11 @@ fn main() {
         "CUDA_ALLOW_UNSUPPORTED_COMPILER",
         "CUDA_HOME",
         "CUDA_TOOLKIT_PATH",
+        "CUDA_PATH",
     ] {
         println!("cargo:rerun-if-env-changed={variable}");
     }
-    let format = env::var("CUDA_IMAGE_FORMAT").unwrap_or_else(|_| "cubin".to_owned());
+    let format = env::var("CUDA_IMAGE_FORMAT").unwrap_or_else(|_| "ptx".to_owned());
     let (target, extension, nvcc_output) = match format.as_str() {
         "cubin" => {
             let target =
@@ -57,17 +58,27 @@ fn main() {
     let compiler = Compiler::new(&shaders, &output);
     let toolkit = env::var_os("CUDA_TOOLKIT_PATH")
         .or_else(|| env::var_os("CUDA_HOME"))
+        .or_else(|| env::var_os("CUDA_PATH"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/local/cuda"));
-    let host = env::var("CUDA_HOST_CXX").unwrap_or_else(|_| "g++-15".to_owned());
+    let host = env::var("CUDA_HOST_CXX")
+        .ok()
+        .or_else(|| cfg!(target_os = "linux").then(|| "g++-15".to_owned()));
+    let nvcc = if cfg!(target_os = "windows") {
+        toolkit.join("bin/nvcc.exe")
+    } else {
+        toolkit.join("bin/nvcc")
+    };
     let mut bindings = String::new();
     for module in MODULES.lines() {
         let source = shaders.join(format!("{module}.slang"));
         let artifact = compiler.compile(&source, Target::Cuda, &[]);
         let image = output.join(format!("{module}.{extension}"));
-        let mut command = Command::new(toolkit.join("bin/nvcc"));
+        let mut command = Command::new(&nvcc);
+        if let Some(host) = &host {
+            command.arg(format!("--compiler-bindir={host}"));
+        }
         command
-            .arg(format!("--compiler-bindir={host}"))
             .args([nvcc_output, "-O2", "-w"])
             .arg(format!("--gpu-architecture={target}"));
         if env::var_os("CUDA_ALLOW_UNSUPPORTED_COMPILER").is_some_and(|value| !value.is_empty()) {

@@ -1,6 +1,9 @@
 mod backend;
 mod frame_graph;
+#[cfg(not(target_os = "windows"))]
 mod pointer_lock;
+#[cfg(target_os = "windows")]
+mod pointer_lock_windows;
 
 pub mod file_picker;
 pub mod project_open;

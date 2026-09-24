@@ -138,6 +138,14 @@ extern "C" void shrimply_qt_preview_pointer_release(float width, float height, f
 extern "C" void shrimply_qt_preview_pointer_cancel();
 extern "C" bool shrimply_qt_preview_guides_visible();
 extern "C" void shrimply_qt_preview_set_guides_visible(bool visible);
+extern "C" bool shrimply_qt_preview_pen_tool_active();
+extern "C" bool shrimply_qt_preview_fill_tool_active();
+extern "C" bool shrimply_qt_preview_transform_tool_active();
+extern "C" bool shrimply_qt_preview_eraser_tool_active();
+extern "C" void shrimply_qt_preview_select_pen_tool();
+extern "C" void shrimply_qt_preview_select_fill_tool();
+extern "C" void shrimply_qt_preview_select_transform_tool();
+extern "C" void shrimply_qt_preview_set_eraser_tool_active(bool active);
 
 namespace {
 
@@ -685,6 +693,7 @@ void TimelineSurface::mousePressEvent(QMouseEvent *event) {
     modifiers(event, control, shift);
     shrimply_qt_timeline_pointer_press(pointer_button(event->button()), event->position().x(),
                                        event->position().y(), control, shift);
+#ifndef Q_OS_WIN
     if (event->button() == Qt::MiddleButton) {
         auto *wayland = qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>();
         void *surface = window() ? reinterpret_cast<void *>(window()->winId()) : nullptr;
@@ -695,6 +704,7 @@ void TimelineSurface::mousePressEvent(QMouseEvent *event) {
             setCursor(QCursor(Qt::BlankCursor));
         }
     }
+#endif
     event->accept();
     update();
 }
@@ -792,6 +802,49 @@ void PreviewSurface::setFullscreenPreview(bool fullscreen) {
     }
     fullscreen_preview_ = fullscreen;
     emit fullscreenPreviewChanged();
+    update();
+}
+
+bool PreviewSurface::penToolActive() const {
+    return shrimply_qt_preview_pen_tool_active();
+}
+
+bool PreviewSurface::fillToolActive() const {
+    return shrimply_qt_preview_fill_tool_active();
+}
+
+bool PreviewSurface::transformToolActive() const {
+    return shrimply_qt_preview_transform_tool_active();
+}
+
+bool PreviewSurface::eraserToolActive() const {
+    return shrimply_qt_preview_eraser_tool_active();
+}
+
+void PreviewSurface::setEraserToolActive(bool active) {
+    if (eraserToolActive() == active) {
+        return;
+    }
+    shrimply_qt_preview_set_eraser_tool_active(active);
+    emit paintToolChanged();
+    update();
+}
+
+void PreviewSurface::selectPenTool() {
+    shrimply_qt_preview_select_pen_tool();
+    emit paintToolChanged();
+    update();
+}
+
+void PreviewSurface::selectFillTool() {
+    shrimply_qt_preview_select_fill_tool();
+    emit paintToolChanged();
+    update();
+}
+
+void PreviewSurface::selectTransformTool() {
+    shrimply_qt_preview_select_transform_tool();
+    emit paintToolChanged();
     update();
 }
 

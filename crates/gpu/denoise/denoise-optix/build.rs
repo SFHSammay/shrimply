@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPTIX_ROOT");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_TOOLKIT_PATH");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
     let optix = env::var_os("OPTIX_ROOT")
         .map(PathBuf::from)
@@ -16,6 +17,7 @@ fn main() {
 
     let cuda = env::var_os("CUDA_HOME")
         .or_else(|| env::var_os("CUDA_TOOLKIT_PATH"))
+        .or_else(|| env::var_os("CUDA_PATH"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/local/cuda"));
     let cuda_include = cuda.join("include");
@@ -33,7 +35,9 @@ fn main() {
         .extra_warnings(true)
         .compile("shrimply_optix_denoiser_bridge");
     println!("cargo:rustc-link-lib=dylib=cuda");
-    println!("cargo:rustc-link-lib=dylib=dl");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        println!("cargo:rustc-link-lib=dylib=dl");
+    }
 }
 
 fn require_header(directory: &Path, name: &str, variable: &str) {

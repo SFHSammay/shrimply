@@ -9,8 +9,10 @@ fn main() {
     println!("cargo:rerun-if-changed=bridge.c");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_TOOLKIT_PATH");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
     let cuda = env::var_os("CUDA_TOOLKIT_PATH")
         .or_else(|| env::var_os("CUDA_HOME"))
+        .or_else(|| env::var_os("CUDA_PATH"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/local/cuda"));
     cc::Build::new()
