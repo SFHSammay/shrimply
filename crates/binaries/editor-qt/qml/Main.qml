@@ -4,9 +4,11 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 import QtQml.Models
+import Qt.labs.qmlmodels
 import dev.shrimply.editor
 import dev.shrimply.export
 import dev.shrimply.inspector
+import dev.shrimply.preferences
 
 ApplicationWindow {
     id: window
@@ -397,10 +399,38 @@ ApplicationWindow {
                                     onClicked: if (previewLoader.item) previewLoader.item.guidesVisible = checked
                                 }
                                 ToolSeparator {}
-                                ToolButton { icon.name: "draw-freehand"; text: backend.translate("Pen"); display: AbstractButton.IconOnly }
-                                ToolButton { icon.name: "fill-color"; text: backend.translate("Fill"); display: AbstractButton.IconOnly }
-                                ToolButton { icon.name: "transform-move"; text: backend.translate("Transform"); display: AbstractButton.IconOnly }
-                                ToolButton { icon.name: "draw-eraser"; text: backend.translate("Eraser"); display: AbstractButton.IconOnly }
+                                ToolButton {
+                                    icon.name: "draw-freehand"
+                                    text: backend.translate("Pen")
+                                    display: AbstractButton.IconOnly
+                                    checkable: true
+                                    Binding on checked { value: previewLoader.item ? previewLoader.item.penToolActive : false }
+                                    onClicked: if (checked && previewLoader.item) previewLoader.item.selectPenTool()
+                                }
+                                ToolButton {
+                                    icon.name: "fill-color"
+                                    text: backend.translate("Fill")
+                                    display: AbstractButton.IconOnly
+                                    checkable: true
+                                    Binding on checked { value: previewLoader.item ? previewLoader.item.fillToolActive : false }
+                                    onClicked: if (checked && previewLoader.item) previewLoader.item.selectFillTool()
+                                }
+                                ToolButton {
+                                    icon.name: "transform-move"
+                                    text: backend.translate("Transform")
+                                    display: AbstractButton.IconOnly
+                                    checkable: true
+                                    Binding on checked { value: previewLoader.item ? previewLoader.item.transformToolActive : false }
+                                    onClicked: if (checked && previewLoader.item) previewLoader.item.selectTransformTool()
+                                }
+                                ToolButton {
+                                    icon.name: "draw-eraser"
+                                    text: backend.translate("Eraser")
+                                    display: AbstractButton.IconOnly
+                                    checkable: true
+                                    Binding on checked { value: previewLoader.item ? previewLoader.item.eraserToolActive : false }
+                                    onClicked: if (previewLoader.item) previewLoader.item.eraserToolActive = checked
+                                }
                             }
                         }
 

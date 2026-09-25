@@ -301,7 +301,6 @@ fn record(
     let (frame_tx, frame_rx) = mpsc::sync_channel(WGC_FRAME_POOL_SIZE as usize);
     let frame_controls = controls.clone();
     let frame_readback = readback.clone();
-    let frame_device = capture_device.clone();
     let frame_pool_size = Arc::new(Mutex::new(size));
     let callback_pool_size = frame_pool_size.clone();
     let frame_token = pool
@@ -311,7 +310,6 @@ fn record(
                     let result = sender.ok().and_then(|pool| match pool.TryGetNextFrame() {
                         Ok(frame) => read_frame_and_resize(
                             pool,
-                            &frame_device,
                             &callback_pool_size,
                             &frame_readback,
                             &frame,
@@ -434,11 +432,13 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, IDirect3DDevice
     .map_err(windows_error)?;
     let device = device.ok_or("D3D11 did not return a device")?;
     let context = context.ok_or("D3D11 did not return an immediate context")?;
-    let dxgi: IDXGIDevice = device.cast().map_err(windows_error)?;
-    let capture_device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
-        .and_then(|value| value.cast())
-        .map_err(windows_error)?;
+    let capture_device = create_capture_device(&device).map_err(windows_error)?;
     Ok((device, context, capture_device))
+}
+
+fn create_capture_device(device: &ID3D11Device) -> WindowsResult<IDirect3DDevice> {
+    let dxgi: IDXGIDevice = device.cast()?;
+    unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.and_then(|value| value.cast())
 }
 
 fn read_frame(
@@ -452,7 +452,6 @@ fn read_frame(
 
 fn read_frame_and_resize(
     pool: &Direct3D11CaptureFramePool,
-    device: &IDirect3DDevice,
     pool_size: &Mutex<SizeInt32>,
     readback: &Mutex<Readback>,
     frame: &windows::Graphics::Capture::Direct3D11CaptureFrame,
@@ -473,8 +472,12 @@ fn read_frame_and_resize(
         Ok(None)
     };
     if content.Width > 0 && content.Height > 0 {
+        let device = {
+            let readback = readback.lock().map_err(|_| E_ABORT)?;
+            create_capture_device(&readback.device)?
+        };
         pool.Recreate(
-            device,
+            &device,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             WGC_FRAME_POOL_SIZE,
             content,
@@ -581,7 +584,7 @@ impl VideoWriter {
         let (fps_numerator, fps_denominator) = fps_parts_i32(fps)?;
         let time_base = ffmpeg::Rational(fps_denominator, fps_numerator);
         let frame_rate = ffmpeg::Rational(fps_numerator, fps_denominator);
-        let encoder = open_hevc_encoder(width, height, time_base, frame_rate, global_header)?;
+        let encoder = open_recording_encoder(width, height, time_base, frame_rate, global_header)?;
         let stream_index = {
             let mut stream = output
                 .add_stream_with(encoder.as_ref())
@@ -742,15 +745,106 @@ fn screen_scaler(
     .map_err(|error| error.to_string())
 }
 
-fn open_hevc_encoder(
+#[derive(Clone, Copy)]
+enum RecordingEncoder {
+    HevcNvenc,
+    H264Nvenc,
+    LibX264,
+    Mpeg4,
+}
+
+impl RecordingEncoder {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::HevcNvenc => "hevc_nvenc",
+            Self::H264Nvenc => "h264_nvenc",
+            Self::LibX264 => "libx264",
+            Self::Mpeg4 => "mpeg4",
+        }
+    }
+
+    fn options(self) -> ffmpeg::Dictionary<'static> {
+        let mut options = ffmpeg::Dictionary::new();
+        match self {
+            Self::HevcNvenc => {
+                options.set("preset", "p3");
+                options.set("tune", "ll");
+                options.set("profile", "main");
+                options.set("rc", "constqp");
+                options.set("qp", NVENC_CONSTANT_QP);
+                options.set("bf", &NVENC_B_FRAMES.to_string());
+                options.set("spatial-aq", "1");
+                options.set("temporal-aq", "0");
+                options.set("zerolatency", "1");
+                options.set("delay", "0");
+            }
+            Self::H264Nvenc => {
+                options.set("preset", "p3");
+                options.set("tune", "ll");
+                options.set("rc", "constqp");
+                options.set("qp", NVENC_CONSTANT_QP);
+                options.set("bf", &NVENC_B_FRAMES.to_string());
+                options.set("spatial-aq", "1");
+                options.set("temporal-aq", "0");
+                options.set("zerolatency", "1");
+                options.set("delay", "0");
+            }
+            Self::LibX264 => {
+                options.set("preset", "veryfast");
+                options.set("tune", "zerolatency");
+                options.set("crf", "23");
+            }
+            Self::Mpeg4 => {}
+        }
+        options
+    }
+}
+
+const SOFTWARE_FALLBACK_BITRATE: usize = 8_000_000;
+
+fn open_recording_encoder(
     width: u32,
     height: u32,
     time_base: ffmpeg::Rational,
     frame_rate: ffmpeg::Rational,
     global_header: bool,
 ) -> Result<ffmpeg::codec::encoder::video::Encoder, String> {
-    let codec = ffmpeg::codec::encoder::find_by_name("hevc_nvenc")
-        .ok_or("FFmpeg encoder hevc_nvenc was not found")?;
+    let mut errors = Vec::new();
+    for candidate in [
+        RecordingEncoder::HevcNvenc,
+        RecordingEncoder::H264Nvenc,
+        RecordingEncoder::LibX264,
+        RecordingEncoder::Mpeg4,
+    ] {
+        match open_recording_encoder_candidate(
+            candidate,
+            width,
+            height,
+            time_base,
+            frame_rate,
+            global_header,
+        ) {
+            Ok(encoder) => return Ok(encoder),
+            Err(error) => errors.push(error),
+        }
+    }
+    Err(format!(
+        "Could not open a screen recording encoder:\n{}",
+        errors.join("\n")
+    ))
+}
+
+fn open_recording_encoder_candidate(
+    candidate: RecordingEncoder,
+    width: u32,
+    height: u32,
+    time_base: ffmpeg::Rational,
+    frame_rate: ffmpeg::Rational,
+    global_header: bool,
+) -> Result<ffmpeg::codec::encoder::video::Encoder, String> {
+    let name = candidate.name();
+    let codec = ffmpeg::codec::encoder::find_by_name(name)
+        .ok_or_else(|| format!("FFmpeg encoder {name} was not found"))?;
     let mut encoder = ffmpeg::codec::Context::new_with_codec(codec)
         .encoder()
         .video()
@@ -772,20 +866,12 @@ fn open_hevc_encoder(
             (*encoder.as_mut_ptr()).flags |= ffmpeg::sys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
         }
     }
-    let mut options = ffmpeg::Dictionary::new();
-    options.set("preset", "p3");
-    options.set("tune", "ll");
-    options.set("profile", "main");
-    options.set("rc", "constqp");
-    options.set("qp", NVENC_CONSTANT_QP);
-    options.set("bf", &NVENC_B_FRAMES.to_string());
-    options.set("spatial-aq", "1");
-    options.set("temporal-aq", "0");
-    options.set("zerolatency", "1");
-    options.set("delay", "0");
+    if matches!(candidate, RecordingEncoder::Mpeg4) {
+        encoder.set_bit_rate(SOFTWARE_FALLBACK_BITRATE);
+    }
     encoder
-        .open_as_with(codec, options)
-        .map_err(|error| format!("Could not open hevc_nvenc: {error}"))
+        .open_as_with(codec, candidate.options())
+        .map_err(|error| format!("Could not open {name}: {error}"))
 }
 
 fn fps_parts_i32(fps: Fraction) -> Result<(i32, i32), String> {

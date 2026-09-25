@@ -5,8 +5,7 @@ fn main() {
         CxxQtBuilder::new_qml_module(
             QmlModule::new("dev.shrimply.editor")
                 .qml_file("qml/Main.qml")
-                .qml_file("qml/AboutWindow.qml")
-                .qml_file("qml/PreferencesWindow.qml"),
+                .qml_file("qml/AboutWindow.qml"),
         )
         .files(["src/backend.rs"])
         .qrc("qml/assets.qrc")
