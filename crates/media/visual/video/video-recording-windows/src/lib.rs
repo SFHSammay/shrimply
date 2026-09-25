@@ -750,7 +750,6 @@ enum RecordingEncoder {
     HevcNvenc,
     H264Nvenc,
     LibX264,
-    Mpeg4,
 }
 
 impl RecordingEncoder {
@@ -759,7 +758,6 @@ impl RecordingEncoder {
             Self::HevcNvenc => "hevc_nvenc",
             Self::H264Nvenc => "h264_nvenc",
             Self::LibX264 => "libx264",
-            Self::Mpeg4 => "mpeg4",
         }
     }
 
@@ -794,13 +792,10 @@ impl RecordingEncoder {
                 options.set("tune", "zerolatency");
                 options.set("crf", "23");
             }
-            Self::Mpeg4 => {}
         }
         options
     }
 }
-
-const SOFTWARE_FALLBACK_BITRATE: usize = 8_000_000;
 
 fn open_recording_encoder(
     width: u32,
@@ -814,7 +809,6 @@ fn open_recording_encoder(
         RecordingEncoder::HevcNvenc,
         RecordingEncoder::H264Nvenc,
         RecordingEncoder::LibX264,
-        RecordingEncoder::Mpeg4,
     ] {
         match open_recording_encoder_candidate(
             candidate,
@@ -865,9 +859,6 @@ fn open_recording_encoder_candidate(
         unsafe {
             (*encoder.as_mut_ptr()).flags |= ffmpeg::sys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
         }
-    }
-    if matches!(candidate, RecordingEncoder::Mpeg4) {
-        encoder.set_bit_rate(SOFTWARE_FALLBACK_BITRATE);
     }
     encoder
         .open_as_with(codec, candidate.options())

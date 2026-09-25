@@ -2,7 +2,7 @@ name: Windows
 
 on:
   push:
-    branches: [windows]
+    branches: [windows, windows-port-sync]
     paths:
       - ".github/workflows/windows.yml"
       - "packaging/windows/**"
