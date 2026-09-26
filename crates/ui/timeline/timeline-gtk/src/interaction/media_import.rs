@@ -10,7 +10,7 @@ pub(crate) fn open_track_import_dialog(
     let dialog = gtk::FileDialog::builder()
         .title(tr!(label).as_ref())
         .build();
-    let area = area.clone();
+    let area = area.downgrade();
     let runtime = Rc::downgrade(runtime);
     shrimply_components_gtk::file_picker::open(
         label,
@@ -20,12 +20,16 @@ pub(crate) fn open_track_import_dialog(
             let Some(path) = result.ok().and_then(|file| file.path()) else {
                 return;
             };
-            let Some(runtime) = runtime.upgrade() else {
+            let (Some(area), Some(runtime)) = (area.upgrade(), runtime.upgrade()) else {
                 return;
             };
             let result = runtime.borrow_mut().scene.import_track_file(path, &targets);
-            if let Err(error) = result {
-                show_error_dialog(&area, "Could not import file", &error);
+            match result {
+                Ok(started) if started.needs_remux => {
+                    crate::external_content::confirm_remux(&area, &runtime, started.batch);
+                }
+                Ok(_) => {}
+                Err(error) => show_error_dialog(&area, "Could not import file", &error),
             }
             area.queue_render();
         },

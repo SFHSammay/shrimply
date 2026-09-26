@@ -248,77 +248,6 @@ pub fn direct_media_kind(kind: FileKind) -> bool {
     )
 }
 
-pub enum TrackImportStart {
-    Inspect(TrackImportInspection),
-    Complete((ImportResult, Time)),
-}
-
-pub struct TrackImportInspection {
-    pub subscription: Subscription<InspectionKey, (), MediaInfo>,
-    pub context: TrackImportContext,
-}
-
-pub struct TrackImportContext {
-    kind: TrackKind,
-    track_indices: Vec<usize>,
-    start: Time,
-}
-
-pub fn start_track_import(
-    project: &mut Project,
-    path: PathBuf,
-    kind: TrackKind,
-    track_indices: Vec<usize>,
-    start: Time,
-    default_visual_duration: Time,
-) -> Result<TrackImportStart, String> {
-    if track_indices.is_empty() {
-        return Err("no import tracks were selected".to_string());
-    }
-    let file_kind = file_kind(&path).ok_or_else(|| "unsupported file type".to_string())?;
-    if direct_media_kind(file_kind) && kind != TrackKind::Caption {
-        return Ok(TrackImportStart::Inspect(TrackImportInspection {
-            subscription: request_inspection(path, project.canvas_size, default_visual_duration),
-            context: TrackImportContext {
-                kind,
-                track_indices,
-                start,
-            },
-        }));
-    }
-    if file_kind != FileKind::Vtt {
-        return Err(if kind == TrackKind::Caption {
-            "only VTT files can be imported to caption tracks"
-        } else {
-            "MKV and WebM need to be remuxed before track import"
-        }
-        .to_string());
-    }
-    if kind != TrackKind::Caption {
-        return Err("VTT files can only be imported to caption tracks".to_string());
-    }
-    let result = apply_vtt_to_tracks(project, &path, &track_indices, start)?;
-    shrimply_project_document::project::commit_edit(project, "import-vtt");
-    Ok(TrackImportStart::Complete((result, project.duration())))
-}
-
-pub fn finish_track_import_inspection(
-    project: &mut Project,
-    context: TrackImportContext,
-    info: &MediaInfo,
-) -> Result<(ImportResult, Time), String> {
-    info.snapshot.ensure_current()?;
-    let result = apply_media_to_tracks(
-        project,
-        info,
-        context.kind,
-        &context.track_indices,
-        context.start,
-    )?;
-    shrimply_project_document::project::commit_edit(project, "import-media-to-tracks");
-    Ok((result, project.duration()))
-}
-
 pub fn finish_track_import(
     player_state: &SharedPlayerState,
     selection_state: &SharedSelectionState,
@@ -833,10 +762,33 @@ pub fn vtt_ranges(path: &Path) -> Result<Vec<(Time, Time)>, String> {
 }
 
 pub fn remux_mkv_to_mp4(input: &Path) -> Result<PathBuf, String> {
-    let output = remux_output_path(input)?;
-    remux(input, &output).inspect_err(|_| {
-        let _ = fs::remove_file(&output);
-    })?;
+    let file = remux_to_mp4(
+        input,
+        &project_directory().join(REMUX_MEDIA_DIR),
+        shrimply_resource_pipeline::CancelToken::default(),
+    )?;
+    let path = file.path().to_path_buf();
+    file.keep();
+    Ok(path)
+}
+
+pub(crate) const REMUX_MEDIA_DIR: &str = "media/remuxed";
+
+pub(crate) fn remux_to_mp4(
+    input: &Path,
+    directory: &Path,
+    cancellation: shrimply_resource_pipeline::CancelToken,
+) -> Result<crate::external_content::OwnedFile, String> {
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("could not create remux media directory: {error}"))?;
+    let stem = input
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("remuxed");
+    let output = crate::external_content::OwnedFile::new(
+        directory.join(format!("{stem}-{}.mp4", uuid::Uuid::new_v4())),
+    );
+    remux(input, output.path(), cancellation)?;
     Ok(output)
 }
 
@@ -1175,9 +1127,15 @@ fn parse_vtt_timestamp(value: &str) -> Option<Time> {
     ))
 }
 
-fn remux(input: &Path, output: &Path) -> Result<(), String> {
-    let mut input_context = format::input(input)
-        .map_err(|error| format!("could not open {}: {error}", input.display()))?;
+fn remux(
+    input: &Path,
+    output: &Path,
+    cancellation: shrimply_resource_pipeline::CancelToken,
+) -> Result<(), String> {
+    let interrupt = cancellation.clone();
+    let mut input_context =
+        format::input_with_interrupt(input, move || interrupt.is_cancelled())
+            .map_err(|error| format!("could not open {}: {error}", input.display()))?;
     let mut output_context = format::output(output)
         .map_err(|error| format!("could not create {}: {error}", output.display()))?;
     let stream_count = input_context.nb_streams() as usize;
@@ -1212,8 +1170,22 @@ fn remux(input: &Path, output: &Path) -> Result<(), String> {
         .write_header()
         .map_err(|error| format!("could not write {} header: {error}", output.display()))?;
 
-    for (stream, mut packet) in input_context.packets() {
-        let input_index = stream.index();
+    loop {
+        if cancellation.is_cancelled() {
+            return Err("Media import was cancelled".into());
+        }
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(&mut input_context) {
+            Ok(()) => {}
+            Err(ffmpeg::Error::Eof) => break,
+            Err(error) => {
+                return Err(format!(
+                    "could not read {} packet: {error}",
+                    input.display()
+                ));
+            }
+        }
+        let input_index = packet.stream();
         let output_index = stream_mapping[input_index];
         if output_index < 0 {
             continue;
@@ -1229,21 +1201,12 @@ fn remux(input: &Path, output: &Path) -> Result<(), String> {
             .map_err(|error| format!("could not write {} packet: {error}", output.display()))?;
     }
 
+    if cancellation.is_cancelled() {
+        return Err("Media import was cancelled".into());
+    }
     output_context
         .write_trailer()
         .map_err(|error| format!("could not write {} trailer: {error}", output.display()))
-}
-
-fn remux_output_path(input: &Path) -> Result<PathBuf, String> {
-    const REMUX_MEDIA_DIR: &str = "media/remuxed";
-    let parent = project_directory().join(REMUX_MEDIA_DIR);
-    fs::create_dir_all(&parent)
-        .map_err(|error| format!("could not create remux media directory: {error}"))?;
-    let stem = input
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("remuxed");
-    Ok(parent.join(format!("{stem}-{}.mp4", uuid::Uuid::new_v4())))
 }
 
 fn rational_as_f64(value: Rational) -> f64 {

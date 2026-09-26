@@ -10,7 +10,7 @@ use shrimply_math_color::Color;
 use shrimply_playback_performance as playback_performance;
 #[cfg(target_os = "linux")]
 use shrimply_pointer_lock_wayland::WaylandPointerLock;
-use shrimply_project_document::project::{Project, Time, TrackAddress};
+use shrimply_project_document::project::Project;
 use shrimply_surface_gl_skia::TimelineRenderer;
 use shrimply_timeline_edit::selection_state::SharedSelectionState;
 pub use shrimply_timeline_skia::scene::PointerButton as ToolkitPointerButton;
@@ -59,7 +59,7 @@ pub struct ToolkitTimeline {
     context_menu: ContextMenu,
     track_add_request: Option<TrackAddMenuRequest>,
     track_add_presentation: Option<TrackAddMenuPresentation>,
-    track_remux_request: Option<(PathBuf, Vec<TrackAddress>, Time)>,
+    track_remux_request: Option<shrimply_timeline_skia::import_queue::BatchId>,
     interaction_error: Option<String>,
     screen_recording: Option<video_recording::ScreenRecording>,
     #[cfg(windows)]
@@ -289,40 +289,25 @@ impl ToolkitTimeline {
             .track_add_request
             .as_ref()
             .ok_or("Track add menu is no longer active")?;
-        if matches!(
-            shrimply_timeline_skia::import::file_kind(&path),
-            Some(
-                shrimply_timeline_skia::import::FileKind::Mkv
-                    | shrimply_timeline_skia::import::FileKind::WebM
-            )
-        ) {
-            let targets = request
-                .import_targets
-                .iter()
-                .map(|target| {
-                    shrimply_timeline_edit::selection_state::track_address(
-                        &self.project.borrow(),
-                        *target,
-                    )
-                    .ok_or("Import destination track no longer exists")
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            self.track_remux_request =
-                Some((path, targets, player_state::current_time(&self.player)));
-            return Ok(TrackFileImport::ConfirmRemux);
+        if self.track_remux_request.is_some() {
+            return Err("A track import is already awaiting confirmation".into());
         }
-        self.scene
-            .import_track_file(path, &request.import_targets)
-            .map(|()| TrackFileImport::Started)
+        let started = self
+            .scene
+            .import_track_file(path, &request.import_targets)?;
+        if started.needs_remux {
+            self.track_remux_request = Some(started.batch);
+            Ok(TrackFileImport::ConfirmRemux)
+        } else {
+            Ok(TrackFileImport::Started)
+        }
     }
     pub fn confirm_track_remux(&mut self, remux: bool) -> Result<(), String> {
-        let Some((path, targets, start)) = self.track_remux_request.take() else {
-            return Err("Track remux request is no longer active".into());
-        };
-        if !remux {
-            return Ok(());
-        }
-        self.scene.begin_track_remux(path, targets, start)
+        let batch = self
+            .track_remux_request
+            .take()
+            .ok_or("Track remux request is no longer active")?;
+        self.scene.confirm_import_remux(batch, remux)
     }
     pub fn take_error(&mut self) -> Option<String> {
         self.interaction_error

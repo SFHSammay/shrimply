@@ -55,9 +55,9 @@ track whose menu you opened. If that track is part of a multi-track selection,
 the import targets all selected tracks of the same type.
 
 Video and audio files can only be imported to video or audio tracks. WebVTT
-files can only be imported to caption tracks. MKV and WebM files dropped onto
-the timeline can be losslessly remuxed to MP4 first; they cannot be imported
-directly from a track's add menu.
+files can only be imported to caption tracks. MKV and WebM imports ask for
+confirmation before losslessly remuxing to MP4. The timeline uses the MP4 copy,
+and the original file is kept.
 
 Supported formats
 ~~~~~~~~~~~~~~~~~

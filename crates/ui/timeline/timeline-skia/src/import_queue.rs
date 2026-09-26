@@ -1,14 +1,20 @@
 use crate::{
-    DragCollisionMode, import,
+    DragCollisionMode,
+    external_content::OwnedFile,
+    import,
     items::NewItemTarget,
-    project::{self, Project, Time},
+    project::{self, CanvasSize, Project, Time},
 };
-use shrimply_resource_pipeline::{Event, Subscription, TryNext};
+use shrimply_resource_pipeline::{CancelToken, Event, Subscription, TryNext};
 use shrimply_timeline_edit::{TrackKey, TrackKind, selection_state};
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
 };
 
 static NEXT_BATCH: AtomicU64 = AtomicU64::new(0);
@@ -16,9 +22,15 @@ static NEXT_BATCH: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BatchId(u64);
 
+pub struct ImportStart {
+    pub batch: BatchId,
+    pub needs_remux: bool,
+}
+
 pub struct Completion {
     pub batch: BatchId,
     pub paths: Vec<PathBuf>,
+    pub cancelled: bool,
     pub result: Result<(import::ImportResult, Time), String>,
 }
 
@@ -29,13 +41,57 @@ pub struct Placement {
     pub collision: DragCollisionMode,
 }
 
-struct Pending {
+struct Inspection {
     path: PathBuf,
+    subscription: Subscription<import::InspectionKey, (), import::MediaInfo>,
+    info: Option<Arc<import::MediaInfo>>,
+}
+
+struct PendingBatch {
     batch: BatchId,
     target: Target,
-    placement: Placement,
-    inspection: Subscription<import::InspectionKey, (), import::MediaInfo>,
-    info: Option<std::sync::Arc<import::MediaInfo>>,
+    start: Time,
+    collision: DragCollisionMode,
+    phase: Phase,
+}
+
+enum Phase {
+    Pending {
+        sources: Vec<PathBuf>,
+        output_directory: PathBuf,
+        canvas_size: CanvasSize,
+        default_duration: Time,
+    },
+    Remuxing {
+        sources: Vec<PathBuf>,
+        job: RemuxJob,
+        canvas_size: CanvasSize,
+        default_duration: Time,
+    },
+    Inspecting {
+        inspections: Vec<Inspection>,
+        owned_files: Vec<OwnedFile>,
+    },
+    Failed {
+        sources: Vec<PathBuf>,
+        error: String,
+    },
+}
+
+struct RemuxJob {
+    receiver: mpsc::Receiver<Result<PreparedFiles, String>>,
+    cancellation: CancelToken,
+}
+
+impl Drop for RemuxJob {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+struct PreparedFiles {
+    paths: Vec<PathBuf>,
+    owned_files: Vec<OwnedFile>,
 }
 
 #[derive(Clone)]
@@ -44,10 +100,108 @@ enum Target {
     Tracks(Vec<project::TrackAddress>),
 }
 
-/// Inspects files on the existing media worker pool and applies results in drop order.
+/// Owns imports from confirmation through preparation and commit, in submission order.
 #[derive(Default)]
 pub struct ImportQueue {
-    pending: VecDeque<Pending>,
+    pending: VecDeque<PendingBatch>,
+    completed: VecDeque<Completion>,
+}
+
+impl Phase {
+    fn new(paths: Vec<PathBuf>, canvas_size: CanvasSize, default_duration: Time) -> Self {
+        if paths.iter().any(|path| {
+            matches!(
+                import::file_kind(path),
+                Some(import::FileKind::Mkv | import::FileKind::WebM)
+            )
+        }) {
+            Self::Pending {
+                sources: paths,
+                output_directory: project::project_directory().join(import::REMUX_MEDIA_DIR),
+                canvas_size,
+                default_duration,
+            }
+        } else {
+            Self::inspect(
+                PreparedFiles {
+                    paths,
+                    owned_files: Vec::new(),
+                },
+                canvas_size,
+                default_duration,
+            )
+        }
+    }
+
+    fn inspect(prepared: PreparedFiles, canvas_size: CanvasSize, default_duration: Time) -> Self {
+        Self::Inspecting {
+            inspections: prepared
+                .paths
+                .into_iter()
+                .map(|path| Inspection {
+                    subscription: import::request_inspection(
+                        path.clone(),
+                        canvas_size,
+                        default_duration,
+                    ),
+                    path,
+                    info: None,
+                })
+                .collect(),
+            owned_files: prepared.owned_files,
+        }
+    }
+
+    fn poll(&mut self) -> Option<Result<(), String>> {
+        match self {
+            Self::Pending { .. } => return None,
+            Self::Failed { error, .. } => return Some(Err(error.clone())),
+            Self::Remuxing {
+                job,
+                canvas_size,
+                default_duration,
+                ..
+            } => match job.receiver.try_recv() {
+                Ok(Ok(prepared)) => {
+                    *self = Self::inspect(prepared, *canvas_size, *default_duration);
+                }
+                Ok(Err(error)) => return Some(Err(error)),
+                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Some(Err("Media remux worker stopped unexpectedly".into()));
+                }
+            },
+            Self::Inspecting { .. } => {}
+        }
+        let Self::Inspecting { inspections, .. } = self else {
+            unreachable!("prepared import must be inspecting");
+        };
+        for inspection in inspections {
+            if inspection.info.is_some() {
+                continue;
+            }
+            loop {
+                let error = match inspection.subscription.try_next() {
+                    TryNext::Empty => return None,
+                    TryNext::Event(Event::Progress(_)) => continue,
+                    TryNext::Event(Event::Finished(info)) => {
+                        if info.source.path() != inspection.path {
+                            return Some(
+                                Err("Media inspection returned a different source".into()),
+                            );
+                        }
+                        inspection.info = Some(info);
+                        break;
+                    }
+                    TryNext::Event(Event::Failed(error)) => error.to_string(),
+                    TryNext::Event(Event::Cancelled) => "media inspection was cancelled".into(),
+                    TryNext::Closed => "media inspection worker stopped unexpectedly".into(),
+                };
+                return Some(Err(format!("{}: {error}", inspection.path.display())));
+            }
+        }
+        Some(Ok(()))
+    }
 }
 
 impl ImportQueue {
@@ -57,50 +211,15 @@ impl ImportQueue {
         project: &Project,
         placement: Placement,
         default_duration: Time,
-    ) -> Result<BatchId, String> {
-        let paths: Vec<_> = paths.into_iter().collect();
-        if crate::external_content::external_files_need_remux(&paths)? {
-            return Err("MKV and WebM must be remuxed before timeline import".into());
-        }
-        let track = match placement.target {
-            NewItemTarget::Automatic => None,
-            NewItemTarget::AtY(y) => {
-                let rows = crate::items::track_rows(project);
-                let row = crate::math::track_row_at_y(y).and_then(|index| rows.get(index));
-                if row.is_some_and(|row| row.root_key.is_none()) {
-                    return Err("Import into an expanded nested track is not supported yet. Drop onto a top-level track.".into());
-                }
-                row.map(|row| row.address.clone())
-            }
-        };
+    ) -> Result<ImportStart, String> {
         let batch = self.reserve_batch();
-        self.enqueue_batch(batch, paths, project, placement, default_duration, track)?;
-        Ok(batch)
-    }
-
-    fn enqueue_batch(
-        &mut self,
-        batch: BatchId,
-        paths: Vec<PathBuf>,
-        project: &Project,
-        placement: Placement,
-        default_duration: Time,
-        track: Option<project::TrackAddress>,
-    ) -> Result<(), String> {
-        self.pending.extend(paths.into_iter().map(|path| Pending {
+        self.enqueue_reserved(
             batch,
-            target: Target::Timeline(track.clone()),
-
-            inspection: import::request_inspection(
-                path.clone(),
-                project.canvas_size,
-                default_duration,
-            ),
-            info: None,
-            path,
+            paths.into_iter().collect(),
+            project,
             placement,
-        }));
-        Ok(())
+            default_duration,
+        )
     }
 
     pub(crate) fn reserve_batch(&mut self) -> BatchId {
@@ -120,10 +239,8 @@ impl ImportQueue {
         project: &Project,
         placement: Placement,
         default_duration: Time,
-    ) -> Result<(), String> {
-        if crate::external_content::external_files_need_remux(&paths)? {
-            return Err("MKV and WebM must be remuxed before timeline import".into());
-        }
+    ) -> Result<ImportStart, String> {
+        crate::external_content::external_files_need_remux(&paths)?;
         let track = match placement.target {
             NewItemTarget::Automatic => None,
             NewItemTarget::AtY(y) => {
@@ -135,7 +252,14 @@ impl ImportQueue {
                 row.map(|row| row.address.clone())
             }
         };
-        self.enqueue_batch(batch, paths, project, placement, default_duration, track)
+        let pending = PendingBatch {
+            batch,
+            target: Target::Timeline(track),
+            start: placement.start,
+            collision: placement.collision,
+            phase: Phase::new(paths, project.canvas_size, default_duration),
+        };
+        Ok(self.push(pending))
     }
 
     pub fn enqueue_tracks(
@@ -145,7 +269,11 @@ impl ImportQueue {
         keys: &[TrackKey],
         start: Time,
         default_duration: Time,
-    ) -> Result<BatchId, String> {
+    ) -> Result<ImportStart, String> {
+        let kind = keys.first().ok_or("no import tracks were selected")?.kind;
+        if keys.iter().any(|key| key.kind != kind) {
+            return Err("import tracks must have the same kind".into());
+        }
         let mut tracks = Vec::new();
         for key in keys {
             let address = selection_state::track_address(project, *key)
@@ -154,38 +282,7 @@ impl ImportQueue {
                 tracks.push(address);
             }
         }
-        let batch = self.reserve_batch();
-        self.enqueue_track_addresses_reserved(
-            batch,
-            paths.into_iter().collect(),
-            project,
-            tracks,
-            start,
-            default_duration,
-        )?;
-        Ok(batch)
-    }
-
-    pub(crate) fn enqueue_track_addresses_reserved(
-        &mut self,
-        batch: BatchId,
-        paths: Vec<PathBuf>,
-        project: &Project,
-        tracks: Vec<project::TrackAddress>,
-        start: Time,
-        default_duration: Time,
-    ) -> Result<(), String> {
-        let keys = tracks
-            .iter()
-            .map(|address| {
-                selection_state::track_key(project, address)
-                    .ok_or("import destination track no longer exists")
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let kind = keys.first().ok_or("no import tracks were selected")?.kind;
-        if keys.iter().any(|key| key.kind != kind) {
-            return Err("import tracks must have the same kind".into());
-        }
+        let paths: Vec<_> = paths.into_iter().collect();
         if paths.is_empty() {
             return Err("no import files were selected".into());
         }
@@ -197,131 +294,191 @@ impl ImportQueue {
             if kind != TrackKind::Caption && file_kind == import::FileKind::Vtt {
                 return Err("VTT files can only be imported to caption tracks".into());
             }
-            if kind != TrackKind::Caption && !import::direct_media_kind(file_kind) {
-                return Err("MKV and WebM need to be remuxed before track import".into());
-            }
         }
-        self.pending.extend(paths.into_iter().map(|path| Pending {
+        let batch = self.reserve_batch();
+        let pending = PendingBatch {
             batch,
-            target: Target::Tracks(tracks.clone()),
-            inspection: import::request_inspection(
-                path.clone(),
-                project.canvas_size,
+            target: Target::Tracks(tracks),
+            start,
+            collision: DragCollisionMode::NewTrack,
+            phase: Phase::new(paths, project.canvas_size, default_duration),
+        };
+        Ok(self.push(pending))
+    }
+
+    fn push(&mut self, pending: PendingBatch) -> ImportStart {
+        let needs_remux = matches!(pending.phase, Phase::Pending { .. });
+        let batch = pending.batch;
+        self.pending.push_back(pending);
+        ImportStart { batch, needs_remux }
+    }
+
+    pub fn confirm_remux(&mut self, batch: BatchId, accepted: bool) -> Result<(), String> {
+        let index = self
+            .pending
+            .iter()
+            .position(|pending| pending.batch == batch)
+            .ok_or("Remux request is no longer active")?;
+        if !matches!(self.pending[index].phase, Phase::Pending { .. }) {
+            return Err("Remux request has already been answered".into());
+        }
+        let mut pending = self.pending.remove(index).expect("pending remux exists");
+        let Phase::Pending {
+            sources,
+            output_directory,
+            canvas_size,
+            default_duration,
+        } = pending.phase
+        else {
+            unreachable!("validated pending remux");
+        };
+        if !accepted {
+            self.completed.push_back(Completion {
+                batch,
+                paths: sources,
+                cancelled: true,
+                result: Err("Media import was cancelled".into()),
+            });
+            return Ok(());
+        }
+        let paths = sources.clone();
+        let cancellation = CancelToken::default();
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("media-remux".into())
+            .spawn(move || {
+                let result = (|| {
+                    let mut prepared = PreparedFiles {
+                        paths: Vec::new(),
+                        owned_files: Vec::new(),
+                    };
+                    for path in paths {
+                        if worker_cancellation.is_cancelled() {
+                            return Err("Media import was cancelled".into());
+                        }
+                        if matches!(
+                            import::file_kind(&path),
+                            Some(import::FileKind::Mkv | import::FileKind::WebM)
+                        ) {
+                            let output = import::remux_to_mp4(
+                                &path,
+                                &output_directory,
+                                worker_cancellation.clone(),
+                            )?;
+                            prepared.paths.push(output.path().to_path_buf());
+                            prepared.owned_files.push(output);
+                        } else {
+                            prepared.paths.push(path);
+                        }
+                    }
+                    Ok(prepared)
+                })();
+                let _ = sender.send(result);
+            });
+        pending.phase = match spawned {
+            Ok(_) => Phase::Remuxing {
+                sources,
+                job: RemuxJob {
+                    receiver,
+                    cancellation,
+                },
+                canvas_size,
                 default_duration,
-            ),
-            info: None,
-            path,
-            placement: Placement {
-                start,
-                target: NewItemTarget::Automatic,
-                collision: DragCollisionMode::NewTrack,
             },
-        }));
+            Err(error) => Phase::Failed {
+                sources,
+                error: format!("Could not start media remux worker: {error}"),
+            },
+        };
+        self.pending.insert(index, pending);
         Ok(())
     }
 
     pub fn poll(&mut self, project: &mut Project) -> Option<Completion> {
-        let batch = self.pending.front()?.batch;
-        let batch_len = self
-            .pending
-            .iter()
-            .take_while(|pending| pending.batch == batch)
-            .count();
-        for index in 0..batch_len {
-            let pending = self.pending.get_mut(index).expect("batch item exists");
-            if pending.info.is_some() {
-                continue;
-            }
-            loop {
-                match pending.inspection.try_next() {
-                    TryNext::Empty => return None,
-                    TryNext::Event(Event::Progress(_)) => continue,
-                    TryNext::Event(Event::Finished(info)) => {
-                        pending.info = Some(info);
-                        break;
-                    }
-                    event => {
-                        let path = pending.path.clone();
-                        let error = match event {
-                            TryNext::Event(Event::Failed(error)) => error.to_string(),
-                            TryNext::Event(Event::Cancelled) => {
-                                "media inspection was cancelled".into()
-                            }
-                            TryNext::Closed => {
-                                "media inspection worker stopped unexpectedly".into()
-                            }
-                            _ => unreachable!("handled nonterminal event"),
-                        };
-                        let paths = self
-                            .pending
-                            .drain(..batch_len)
-                            .map(|pending| pending.path)
-                            .collect();
-                        return Some(Completion {
-                            batch,
-                            paths,
-                            result: Err(format!("{}: {error}", path.display())),
-                        });
-                    }
-                }
-            }
+        if let Some(completion) = self.completed.pop_front() {
+            return Some(completion);
         }
-
-        let pending: Vec<_> = self.pending.drain(..batch_len).collect();
-        let paths = pending.iter().map(|pending| pending.path.clone()).collect();
+        let prepared = self.pending.front_mut()?.phase.poll()?;
+        let PendingBatch {
+            batch,
+            target,
+            mut start,
+            collision,
+            phase,
+        } = self.pending.pop_front().expect("completed import exists");
+        let (inspections, owned_files) = match phase {
+            Phase::Inspecting {
+                inspections,
+                owned_files,
+            } => (inspections, owned_files),
+            Phase::Remuxing { sources, .. } | Phase::Failed { sources, .. } => {
+                return Some(Completion {
+                    batch,
+                    paths: sources,
+                    cancelled: false,
+                    result: Err(prepared.expect_err("remux cannot complete before inspection")),
+                });
+            }
+            Phase::Pending { .. } => unreachable!("unconfirmed import cannot complete"),
+        };
+        let paths = inspections
+            .iter()
+            .map(|inspection| inspection.path.clone())
+            .collect();
+        let result = prepared.and_then(|()| {
+            let mut candidate = project.clone();
+            let mut imported = import::ImportResult {
+                selection: Vec::new(),
+                video: false,
+                audio: false,
+                captions: false,
+            };
+            for inspection in inspections {
+                let info = inspection
+                    .info
+                    .expect("completed inspection has media info");
+                let (next, end) = apply_pending(&mut candidate, &target, start, collision, &info)
+                    .map_err(|error| format!("{}: {error}", info.source.display()))?;
+                imported.selection.extend(next.selection);
+                imported.video |= next.video;
+                imported.audio |= next.audio;
+                imported.captions |= next.captions;
+                start = end;
+            }
+            project::commit_edit_checked(&candidate, "import-media")?;
+            let duration = candidate.duration();
+            *project = candidate;
+            for file in owned_files {
+                file.keep();
+            }
+            Ok((imported, duration))
+        });
         Some(Completion {
             batch,
             paths,
-            result: (|| {
-                let mut candidate = project.clone();
-                let mut imported = import::ImportResult {
-                    selection: Vec::new(),
-                    video: false,
-                    audio: false,
-                    captions: false,
-                };
-                let mut start = pending
-                    .first()
-                    .expect("completed import batch is not empty")
-                    .placement
-                    .start;
-                for mut item in pending {
-                    item.placement.start = start;
-                    let info = item
-                        .info
-                        .take()
-                        .expect("completed inspection has media info");
-                    let (next, end) = apply_pending(&mut candidate, &item, &info)
-                        .map_err(|error| format!("{}: {error}", item.path.display()))?;
-                    imported.selection.extend(next.selection);
-                    imported.video |= next.video;
-                    imported.audio |= next.audio;
-                    imported.captions |= next.captions;
-                    start = end;
-                }
-                project::commit_edit_checked(&candidate, "import-media")?;
-                let duration = candidate.duration();
-                *project = candidate;
-                Ok((imported, duration))
-            })(),
+            cancelled: false,
+            result,
         })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+        self.pending.is_empty() && self.completed.is_empty()
     }
 }
 
 fn apply_pending(
     project: &mut Project,
-    pending: &Pending,
+    target: &Target,
+    start: Time,
+    collision: DragCollisionMode,
     info: &import::MediaInfo,
 ) -> Result<(import::ImportResult, Time), String> {
     info.snapshot.ensure_current()?;
     if info.video_streams == 0 && info.audio_streams == 0 && info.caption_cues.is_empty() {
         return Err("file contains no importable audio or video stream".into());
     }
-    match &pending.target {
+    match target {
         Target::Timeline(track) => {
             if !info.caption_cues.is_empty() {
                 return Err("Use a caption track's import button to import VTT files".into());
@@ -338,9 +495,9 @@ fn apply_pending(
                 info.duration,
                 info.video_streams,
                 info.audio_streams,
-                pending.placement.start,
+                start,
                 target,
-                pending.placement.collision,
+                collision,
             );
             Ok((import::apply(project, info, &preview), preview.end))
         }
@@ -355,23 +512,12 @@ fn apply_pending(
             let kind = keys.first().expect("validated import tracks").kind;
             let indices = keys.iter().map(|key| key.track_index).collect::<Vec<_>>();
             let imported = if kind == TrackKind::Caption {
-                import::apply_vtt_cues_to_tracks(
-                    project,
-                    &info.caption_cues,
-                    &indices,
-                    pending.placement.start,
-                )?
+                import::apply_vtt_cues_to_tracks(project, &info.caption_cues, &indices, start)?
             } else {
-                import::apply_media_to_tracks(
-                    project,
-                    info,
-                    kind,
-                    &indices,
-                    pending.placement.start,
-                )?
+                import::apply_media_to_tracks(project, info, kind, &indices, start)?
             };
             let step = project.frame_step();
-            let start = pending.placement.start.max(Time::ZERO).snapped(step);
+            let start = start.max(Time::ZERO).snapped(step);
             let end = start
                 .saturating_add(info.duration)
                 .snapped(step)

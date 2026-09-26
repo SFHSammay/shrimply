@@ -104,11 +104,9 @@ pub struct Scene {
     viewport: Rect,
     context: context_menu::Context,
     drop_preview: Option<drop_preview::DropPreview>,
-    track_imports: Vec<crate::import::TrackImportInspection>,
     pub(crate) external_imports: crate::import_queue::ImportQueue,
     pub(crate) external_downloads:
         std::collections::VecDeque<crate::external_content::PendingDownload>,
-    pub(crate) external_remuxes: std::collections::VecDeque<crate::external_content::PendingRemux>,
     pub(crate) external_import_events:
         std::collections::VecDeque<crate::external_content::ExternalImportEvent>,
     pub(crate) external_owned_files:
@@ -301,10 +299,8 @@ impl Scene {
             viewport: Rect::from_min_size(Vec2::ZERO, Vec2::ZERO),
             context: context_menu::Context::default(),
             drop_preview: None,
-            track_imports: Vec::new(),
             external_imports: crate::import_queue::ImportQueue::default(),
             external_downloads: std::collections::VecDeque::new(),
-            external_remuxes: std::collections::VecDeque::new(),
             external_import_events: std::collections::VecDeque::new(),
             external_owned_files: HashMap::new(),
             pending_errors: std::collections::VecDeque::new(),

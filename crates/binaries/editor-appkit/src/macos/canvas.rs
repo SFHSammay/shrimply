@@ -871,17 +871,14 @@ impl CanvasView {
             shrimply_timeline_skia::external_content::ExternalDropAction::Complete => Ok(()),
             shrimply_timeline_skia::external_content::ExternalDropAction::Importing(_) => Ok(()),
             shrimply_timeline_skia::external_content::ExternalDropAction::ConfirmRemux {
-                paths,
                 batch,
             } => {
-                if !self.confirm_remux_prompt() {
-                    return Ok(());
-                }
+                let accepted = self.confirm_remux_prompt();
                 let mut content = self.ivars().content.borrow_mut();
                 let Content::Timeline(scene) = &mut *content else {
                     return Err("timeline closed while confirming media remux".into());
                 };
-                scene.begin_external_remux(paths, point, batch)
+                scene.confirm_import_remux(batch, accepted)
             }
         }
     }
@@ -905,17 +902,14 @@ impl CanvasView {
         let batch = match action {
             shrimply_timeline_skia::external_content::ExternalDropAction::Importing(batch) => batch,
             shrimply_timeline_skia::external_content::ExternalDropAction::ConfirmRemux {
-                paths,
                 batch,
             } => {
-                if !self.confirm_remux_prompt() {
-                    return Ok(());
-                }
+                let accepted = self.confirm_remux_prompt();
                 let mut content = self.ivars().content.borrow_mut();
                 let Content::Timeline(scene) = &mut *content else {
                     return Err("timeline closed while confirming media remux".into());
                 };
-                scene.begin_external_remux(paths, point, batch)?;
+                scene.confirm_import_remux(batch, accepted)?;
                 batch
             }
             shrimply_timeline_skia::external_content::ExternalDropAction::Complete => {

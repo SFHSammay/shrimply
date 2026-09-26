@@ -82,10 +82,9 @@ pub(super) fn insert(
             true
         }
         Ok(shrimply_timeline_skia::external_content::ExternalDropAction::ConfirmRemux {
-            paths,
             batch,
         }) => {
-            confirm_remux(area, runtime, paths, point, batch);
+            confirm_remux(area, runtime, batch);
             true
         }
         Err(error) => {
@@ -95,11 +94,9 @@ pub(super) fn insert(
     }
 }
 
-fn confirm_remux(
+pub(crate) fn confirm_remux(
     area: &gtk::GLArea,
     runtime: &Rc<RefCell<TimelineRuntime>>,
-    paths: Vec<PathBuf>,
-    point: Option<glam::Vec2>,
     batch: shrimply_timeline_skia::import_queue::BatchId,
 ) {
     let dialog = adw::AlertDialog::new(
@@ -110,18 +107,20 @@ fn confirm_remux(
     dialog.set_close_response("cancel");
     dialog.set_default_response(Some("remux"));
     dialog.set_response_appearance("remux", adw::ResponseAppearance::Suggested);
-    let area = area.clone();
-    let runtime = runtime.clone();
+    let response_area = area.downgrade();
+    let runtime = Rc::downgrade(runtime);
     dialog.choose(
-        Some(area.clone().upcast_ref::<gtk::Widget>()),
+        Some(area.upcast_ref::<gtk::Widget>()),
         None::<&gio::Cancellable>,
         move |response| {
-            if response.as_str() == "remux"
-                && let Err(error) = runtime
-                    .borrow_mut()
-                    .scene
-                    .begin_external_remux(paths, point, batch)
-            {
+            let (Some(area), Some(runtime)) = (response_area.upgrade(), runtime.upgrade()) else {
+                return;
+            };
+            let result = runtime
+                .borrow_mut()
+                .scene
+                .confirm_import_remux(batch, response.as_str() == "remux");
+            if let Err(error) = result {
                 show_error_dialog(&area, "Could not remux source file", &error);
             }
             area.queue_render();

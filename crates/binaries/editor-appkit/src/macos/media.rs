@@ -1,14 +1,14 @@
 use objc2::{ClassType, rc::Retained};
 use objc2_app_kit::{
-    NSBitmapImageFileType, NSBitmapImageRep, NSModalResponseOK, NSOpenPanel, NSPasteboard,
-    NSPasteboardTypePNG, NSPasteboardTypeTIFF,
+    NSAlert, NSAlertFirstButtonReturn, NSBitmapImageFileType, NSBitmapImageRep, NSModalResponseOK,
+    NSOpenPanel, NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
 };
-use objc2_foundation::{MainThreadMarker, NSArray, NSDictionary, NSURL};
+use objc2_foundation::{MainThreadMarker, NSArray, NSDictionary, NSString, NSURL};
 use shrimply_cross_ui_core::editor::EditorSession;
 use shrimply_editor_state::{player_state, preferences};
 use shrimply_timeline_skia::{
     DragCollisionMode, TrackKey, import,
-    import_queue::{ImportQueue, Placement},
+    import_queue::{ImportQueue, ImportStart, Placement},
     items::NewItemTarget,
 };
 use std::path::PathBuf;
@@ -66,11 +66,11 @@ impl Imports {
         urls: impl IntoIterator<Item = Retained<NSURL>>,
         session: &EditorSession,
         destination: Destination,
-    ) -> Result<(), String> {
+    ) -> Result<ImportStart, String> {
         let (paths, scopes) = scoped_file_urls(urls)?;
         let duration = preferences::snapshot(&session.preferences).default_visual_duration;
         let project = session.project.borrow();
-        let batch = match destination {
+        let started = match destination {
             Destination::Timeline(placement) => {
                 self.queue.enqueue(paths, &project, placement, duration)?
             }
@@ -82,8 +82,8 @@ impl Imports {
                 duration,
             )?,
         };
-        self.pending_urls.push((batch, scopes));
-        Ok(())
+        self.pending_urls.push((started.batch, scopes));
+        Ok(started)
     }
 
     pub(super) fn retain_pending(
@@ -110,6 +110,10 @@ impl Imports {
             let succeeded = completion.result.is_ok();
             let paths = completion.paths.clone();
             let batch = completion.batch;
+            if completion.cancelled {
+                self.finish_scopes(batch, None);
+                continue;
+            }
             let result = import::finish_track_import(
                 &session.player_state,
                 &session.selection_state,
@@ -255,7 +259,7 @@ pub fn choose_files(
             })
             .collect::<Result<Vec<_>, _>>()?
     };
-    imports.borrow_mut().enqueue(
+    let started = imports.borrow_mut().enqueue(
         panel.URLs(),
         session,
         if tracks.is_empty() {
@@ -267,5 +271,20 @@ pub fn choose_files(
         } else {
             Destination::Tracks(tracks.to_vec())
         },
-    )
+    )?;
+    if started.needs_remux {
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("Remux MKV/WebM to MP4?"));
+        alert.setInformativeText(&NSString::from_str(
+            "MP4 is the supported timeline format. The source files will be kept.",
+        ));
+        alert.addButtonWithTitle(&NSString::from_str("Remux"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        let accepted = alert.runModal() == NSAlertFirstButtonReturn;
+        imports
+            .borrow_mut()
+            .queue
+            .confirm_remux(started.batch, accepted)?;
+    }
+    Ok(())
 }

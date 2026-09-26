@@ -30,10 +30,7 @@ pub enum ExternalDrop {
 pub enum ExternalDropAction {
     Complete,
     Importing(crate::import_queue::BatchId),
-    ConfirmRemux {
-        paths: Vec<PathBuf>,
-        batch: crate::import_queue::BatchId,
-    },
+    ConfirmRemux { batch: crate::import_queue::BatchId },
 }
 
 pub struct ExternalImportEvent {
@@ -47,61 +44,9 @@ pub(crate) struct PendingDownload {
     batch: crate::import_queue::BatchId,
 }
 
-pub(crate) struct PendingRemux {
-    receiver: mpsc::Receiver<Result<RemuxedFiles, String>>,
-    target: RemuxTarget,
-    batch: crate::import_queue::BatchId,
-}
-
-pub(crate) enum RemuxTarget {
-    Timeline(crate::import_queue::Placement),
-    Tracks {
-        tracks: Vec<project::TrackAddress>,
-        start: Time,
-    },
-}
-
-pub(crate) struct RemuxedFiles {
-    paths: Vec<PathBuf>,
-    generated: Vec<OwnedFile>,
-}
-
 pub(crate) struct OwnedFile {
     path: PathBuf,
     keep: bool,
-}
-
-fn remux_files(paths: Vec<PathBuf>) -> mpsc::Receiver<Result<RemuxedFiles, String>> {
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut generated = Vec::new();
-        let result = (|| {
-            let mut outputs = Vec::with_capacity(paths.len());
-            for path in paths {
-                match crate::import::file_kind(&path) {
-                    Some(crate::import::FileKind::Mkv | crate::import::FileKind::WebM) => {
-                        let output = crate::import::remux_mkv_to_mp4(&path)?;
-                        generated.push(OwnedFile::new(output.clone()));
-                        outputs.push(output);
-                    }
-                    Some(_) => outputs.push(path),
-                    None => {
-                        return Err(format!("{} has an unsupported file type", path.display()));
-                    }
-                }
-            }
-            Ok(outputs)
-        })();
-        match result {
-            Err(error) => {
-                let _ = sender.send(Err(error));
-            }
-            Ok(paths) => {
-                let _ = sender.send(Ok(RemuxedFiles { paths, generated }));
-            }
-        }
-    });
-    receiver
 }
 
 impl OwnedFile {
@@ -386,12 +331,9 @@ impl crate::scene::Scene {
         &mut self,
         paths: Vec<PathBuf>,
         point: Option<Vec2>,
-    ) -> Result<crate::import_queue::BatchId, String> {
+    ) -> Result<crate::import_queue::ImportStart, String> {
         if point.is_some_and(|point| !self.external_drop_target(point)) {
             return Err("files cannot be inserted at this timeline position".into());
-        }
-        if external_files_need_remux(&paths)? {
-            return Err("MKV and WebM must be remuxed before timeline import".into());
         }
         let placement = self.external_placement(point);
         self.external_imports.enqueue(
@@ -412,13 +354,14 @@ impl crate::scene::Scene {
                 if point.is_some_and(|point| !self.external_drop_target(point)) {
                     return Err("files cannot be inserted at this timeline position".into());
                 }
-                if external_files_need_remux(&paths)? {
-                    let batch = self.external_imports.reserve_batch();
-                    return Ok(ExternalDropAction::ConfirmRemux { paths, batch });
-                }
-                return self
-                    .enqueue_external_files(paths, point)
-                    .map(ExternalDropAction::Importing);
+                let started = self.enqueue_external_files(paths, point)?;
+                return Ok(if started.needs_remux {
+                    ExternalDropAction::ConfirmRemux {
+                        batch: started.batch,
+                    }
+                } else {
+                    ExternalDropAction::Importing(started.batch)
+                });
             }
             ExternalDrop::Text(text) => {
                 if !self.insert_external_text(text, point) {
@@ -448,49 +391,12 @@ impl crate::scene::Scene {
         Ok(ExternalDropAction::Complete)
     }
 
-    pub fn begin_external_remux(
+    pub fn confirm_import_remux(
         &mut self,
-        paths: Vec<PathBuf>,
-        point: Option<Vec2>,
         batch: crate::import_queue::BatchId,
+        accepted: bool,
     ) -> Result<(), String> {
-        if point.is_some_and(|point| !self.external_drop_target(point)) {
-            return Err("files cannot be inserted at this timeline position".into());
-        }
-        if !external_files_need_remux(&paths)? {
-            return self.external_imports.enqueue_reserved(
-                batch,
-                paths,
-                &self.project.borrow(),
-                self.external_placement(point),
-                self.default_visual_duration,
-            );
-        }
-        let placement = self.external_placement(point);
-        self.external_remuxes.push_back(PendingRemux {
-            receiver: remux_files(paths),
-            target: RemuxTarget::Timeline(placement),
-            batch,
-        });
-        Ok(())
-    }
-
-    pub fn begin_track_remux(
-        &mut self,
-        path: PathBuf,
-        tracks: Vec<project::TrackAddress>,
-        start: Time,
-    ) -> Result<(), String> {
-        if !external_files_need_remux(std::slice::from_ref(&path))? {
-            return Err("Track source does not require remuxing".into());
-        }
-        let batch = self.external_imports.reserve_batch();
-        self.external_remuxes.push_back(PendingRemux {
-            receiver: remux_files(vec![path]),
-            target: RemuxTarget::Tracks { tracks, start },
-            batch,
-        });
-        Ok(())
+        self.external_imports.confirm_remux(batch, accepted)
     }
 
     pub fn enqueue_external_image_url(
@@ -514,64 +420,6 @@ impl crate::scene::Scene {
 
     pub(crate) fn poll_external_content(&mut self) -> bool {
         let mut changed = false;
-        if let Some(remux) = self.external_remuxes.front() {
-            match remux.receiver.try_recv() {
-                Ok(result) => {
-                    let pending = self
-                        .external_remuxes
-                        .pop_front()
-                        .expect("external remux exists");
-                    match result.and_then(|remuxed| {
-                        self.external_owned_files
-                            .insert(pending.batch, remuxed.generated);
-                        match pending.target {
-                            RemuxTarget::Timeline(placement) => {
-                                self.external_imports.enqueue_reserved(
-                                    pending.batch,
-                                    remuxed.paths,
-                                    &self.project.borrow(),
-                                    placement,
-                                    self.default_visual_duration,
-                                )
-                            }
-                            RemuxTarget::Tracks { tracks, start } => {
-                                self.external_imports.enqueue_track_addresses_reserved(
-                                    pending.batch,
-                                    remuxed.paths,
-                                    &self.project.borrow(),
-                                    tracks,
-                                    start,
-                                    self.default_visual_duration,
-                                )
-                            }
-                        }
-                    }) {
-                        Ok(()) => changed = true,
-                        Err(error) => {
-                            self.remove_external_owned_files(pending.batch);
-                            self.external_import_events.push_back(ExternalImportEvent {
-                                batch: pending.batch,
-                                retained_paths: None,
-                            });
-                            self.pending_errors.push_back(error);
-                        }
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    let pending = self
-                        .external_remuxes
-                        .pop_front()
-                        .expect("external remux exists");
-                    self.external_import_events.push_back(ExternalImportEvent {
-                        batch: pending.batch,
-                        retained_paths: None,
-                    });
-                    self.pending_errors
-                        .push_back("Media remux worker stopped unexpectedly".into());
-                }
-            }
-        }
         if let Some(download) = self.external_downloads.front() {
             match download.receiver.try_recv() {
                 Ok(result) => {
@@ -590,7 +438,7 @@ impl crate::scene::Scene {
                             self.default_visual_duration,
                         )
                     }) {
-                        Ok(()) => changed = true,
+                        Ok(_) => changed = true,
                         Err(error) => {
                             self.remove_external_owned_files(pending.batch);
                             self.external_import_events.push_back(ExternalImportEvent {
@@ -621,6 +469,13 @@ impl crate::scene::Scene {
             let Some(completion) = completion else {
                 break;
             };
+            if completion.cancelled {
+                self.external_import_events.push_back(ExternalImportEvent {
+                    batch: completion.batch,
+                    retained_paths: None,
+                });
+                continue;
+            }
             match crate::import::finish_track_import(
                 &self.player,
                 &self.selection,
