@@ -361,7 +361,16 @@ fn connect_audio_playback(
             }
             media_player.set_playback_speed(snapshot.playback_speed);
             media_player.set_playing(snapshot.playing);
-            if (position_changed || project_audio_changed) && !snapshot.playing {
+            if position_changed
+                && !snapshot.playing
+                && matches!(
+                    event,
+                    player_state::PlayerEvent::State(player_state::StateChange {
+                        position: Some(player_state::PositionChange::Seek),
+                        ..
+                    })
+                )
+            {
                 media_player.preview_from(snapshot.position);
             }
         }
