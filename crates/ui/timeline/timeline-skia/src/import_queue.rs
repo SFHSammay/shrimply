@@ -3,7 +3,7 @@ use crate::{
     external_content::OwnedFile,
     import,
     items::NewItemTarget,
-    project::{self, CanvasSize, Project, Time},
+    project::{self, Asset, AssetSnapshot, CanvasSize, Project, Time},
 };
 use shrimply_resource_pipeline::{CancelToken, Event, Subscription, TryNext};
 use shrimply_timeline_edit::{TrackKey, TrackKind, selection_state};
@@ -34,6 +34,26 @@ pub struct Completion {
     pub result: Result<(import::ImportResult, Time), String>,
 }
 
+/// Offered only after the remuxed file has been successfully imported.
+/// Dropping the request keeps the original.
+pub struct SourceDeletion {
+    source: AssetSnapshot,
+    output: AssetSnapshot,
+}
+
+impl SourceDeletion {
+    pub fn source(&self) -> &std::path::Path {
+        self.source.path()
+    }
+
+    pub fn delete(self) -> Result<(), String> {
+        self.output.verify_current()?;
+        self.source.verify_current()?;
+        std::fs::remove_file(self.source.path())
+            .map_err(|error| format!("Could not delete {}: {error}", self.source.path().display()))
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Placement {
     pub start: Time,
@@ -58,7 +78,6 @@ struct PendingBatch {
 enum Phase {
     Pending {
         sources: Vec<PathBuf>,
-        output_directory: PathBuf,
         canvas_size: CanvasSize,
         default_duration: Time,
     },
@@ -71,6 +90,7 @@ enum Phase {
     Inspecting {
         inspections: Vec<Inspection>,
         owned_files: Vec<OwnedFile>,
+        source_deletions: Vec<SourceDeletion>,
     },
     Failed {
         sources: Vec<PathBuf>,
@@ -92,6 +112,7 @@ impl Drop for RemuxJob {
 struct PreparedFiles {
     paths: Vec<PathBuf>,
     owned_files: Vec<OwnedFile>,
+    source_deletions: Vec<SourceDeletion>,
 }
 
 #[derive(Clone)]
@@ -105,6 +126,7 @@ enum Target {
 pub struct ImportQueue {
     pending: VecDeque<PendingBatch>,
     completed: VecDeque<Completion>,
+    source_deletions: VecDeque<SourceDeletion>,
 }
 
 impl Phase {
@@ -117,7 +139,6 @@ impl Phase {
         }) {
             Self::Pending {
                 sources: paths,
-                output_directory: project::project_directory().join(import::REMUX_MEDIA_DIR),
                 canvas_size,
                 default_duration,
             }
@@ -126,6 +147,7 @@ impl Phase {
                 PreparedFiles {
                     paths,
                     owned_files: Vec::new(),
+                    source_deletions: Vec::new(),
                 },
                 canvas_size,
                 default_duration,
@@ -149,6 +171,7 @@ impl Phase {
                 })
                 .collect(),
             owned_files: prepared.owned_files,
+            source_deletions: prepared.source_deletions,
         }
     }
 
@@ -325,7 +348,6 @@ impl ImportQueue {
         let mut pending = self.pending.remove(index).expect("pending remux exists");
         let Phase::Pending {
             sources,
-            output_directory,
             canvas_size,
             default_duration,
         } = pending.phase
@@ -352,6 +374,7 @@ impl ImportQueue {
                     let mut prepared = PreparedFiles {
                         paths: Vec::new(),
                         owned_files: Vec::new(),
+                        source_deletions: Vec::new(),
                     };
                     for path in paths {
                         if worker_cancellation.is_cancelled() {
@@ -361,11 +384,13 @@ impl ImportQueue {
                             import::file_kind(&path),
                             Some(import::FileKind::Mkv | import::FileKind::WebM)
                         ) {
-                            let output = import::remux_to_mp4(
-                                &path,
-                                &output_directory,
-                                worker_cancellation.clone(),
-                            )?;
+                            let source = Asset::new(path.clone()).snapshot()?;
+                            let output = import::remux_to_mp4(&path, worker_cancellation.clone())?;
+                            source.verify_current()?;
+                            prepared.source_deletions.push(SourceDeletion {
+                                source,
+                                output: Asset::new(output.path()).snapshot()?,
+                            });
                             prepared.paths.push(output.path().to_path_buf());
                             prepared.owned_files.push(output);
                         } else {
@@ -407,11 +432,12 @@ impl ImportQueue {
             collision,
             phase,
         } = self.pending.pop_front().expect("completed import exists");
-        let (inspections, owned_files) = match phase {
+        let (inspections, owned_files, source_deletions) = match phase {
             Phase::Inspecting {
                 inspections,
                 owned_files,
-            } => (inspections, owned_files),
+                source_deletions,
+            } => (inspections, owned_files, source_deletions),
             Phase::Remuxing { sources, .. } | Phase::Failed { sources, .. } => {
                 return Some(Completion {
                     batch,
@@ -452,6 +478,7 @@ impl ImportQueue {
             for file in owned_files {
                 file.keep();
             }
+            self.source_deletions.extend(source_deletions);
             Ok((imported, duration))
         });
         Some(Completion {
@@ -464,6 +491,10 @@ impl ImportQueue {
 
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty() && self.completed.is_empty()
+    }
+
+    pub fn take_source_deletion(&mut self) -> Option<SourceDeletion> {
+        self.source_deletions.pop_front()
     }
 }
 

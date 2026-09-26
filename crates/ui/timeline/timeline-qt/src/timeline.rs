@@ -60,6 +60,7 @@ pub struct ToolkitTimeline {
     track_add_request: Option<TrackAddMenuRequest>,
     track_add_presentation: Option<TrackAddMenuPresentation>,
     track_remux_request: Option<shrimply_timeline_skia::import_queue::BatchId>,
+    source_deletion: Option<shrimply_timeline_skia::import_queue::SourceDeletion>,
     interaction_error: Option<String>,
     screen_recording: Option<video_recording::ScreenRecording>,
     #[cfg(windows)]
@@ -99,6 +100,7 @@ impl ToolkitTimeline {
             track_add_request: None,
             track_add_presentation: None,
             track_remux_request: None,
+            source_deletion: None,
             interaction_error: None,
             screen_recording: None,
             #[cfg(windows)]
@@ -313,6 +315,24 @@ impl ToolkitTimeline {
         self.interaction_error
             .take()
             .or_else(|| self.scene.take_error())
+    }
+
+    pub fn take_source_deletion(&mut self) -> Option<PathBuf> {
+        if self.source_deletion.is_some() {
+            return None;
+        }
+        let request = self.scene.take_source_deletion()?;
+        let path = request.source().to_path_buf();
+        self.source_deletion = Some(request);
+        Some(path)
+    }
+
+    pub fn confirm_source_deletion(&mut self, delete: bool) -> Result<(), String> {
+        let request = self.source_deletion.take().ok_or("Source deletion request is no longer active")?;
+        if delete {
+            request.delete()?;
+        }
+        Ok(())
     }
 
     fn poll_pointer_lock(&mut self) {

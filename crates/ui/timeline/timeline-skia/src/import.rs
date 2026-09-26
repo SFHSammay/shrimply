@@ -13,7 +13,7 @@ use shrimply_editor_state::player_state::{self, ProjectChange, SharedPlayerState
 use shrimply_project_document::project::{
     Asset, AssetSnapshot, AudioItem, CanvasSize, CaptionItem, LayerVisibility, LayeredImageItem,
     Project, RepeatStrategy, ResolvedTransform, Time, Transform, VideoItem, VideoItemContent,
-    VisualModifier, default_playback_speed, project_directory,
+    VisualModifier, default_playback_speed,
 };
 use shrimply_project_document::timeline_search;
 use shrimply_property_model::timeline_value::*;
@@ -764,7 +764,6 @@ pub fn vtt_ranges(path: &Path) -> Result<Vec<(Time, Time)>, String> {
 pub fn remux_mkv_to_mp4(input: &Path) -> Result<PathBuf, String> {
     let file = remux_to_mp4(
         input,
-        &project_directory().join(REMUX_MEDIA_DIR),
         shrimply_resource_pipeline::CancelToken::default(),
     )?;
     let path = file.path().to_path_buf();
@@ -772,22 +771,23 @@ pub fn remux_mkv_to_mp4(input: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub(crate) const REMUX_MEDIA_DIR: &str = "media/remuxed";
-
 pub(crate) fn remux_to_mp4(
     input: &Path,
-    directory: &Path,
     cancellation: shrimply_resource_pipeline::CancelToken,
 ) -> Result<crate::external_content::OwnedFile, String> {
-    fs::create_dir_all(directory)
-        .map_err(|error| format!("could not create remux media directory: {error}"))?;
-    let stem = input
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("remuxed");
-    let output = crate::external_content::OwnedFile::new(
-        directory.join(format!("{stem}-{}.mp4", uuid::Uuid::new_v4())),
-    );
+    let mut path = input.with_extension("mp4");
+    loop {
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let mut name = input.file_stem().ok_or("source has no filename")?.to_os_string();
+                name.push(format!("-{}.mp4", uuid::Uuid::new_v4()));
+                path = input.with_file_name(name);
+            }
+            Err(error) => return Err(format!("could not create {}: {error}", path.display())),
+        }
+    }
+    let output = crate::external_content::OwnedFile::new(path);
     remux(input, output.path(), cancellation)?;
     Ok(output)
 }

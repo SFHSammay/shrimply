@@ -516,6 +516,10 @@ impl crate::scene::Scene {
         self.external_import_events.pop_front()
     }
 
+    pub fn take_source_deletion(&mut self) -> Option<crate::import_queue::SourceDeletion> {
+        self.external_imports.take_source_deletion()
+    }
+
     fn remove_external_owned_files(&mut self, batch: crate::import_queue::BatchId) {
         self.external_owned_files.remove(&batch);
     }

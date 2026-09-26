@@ -101,7 +101,7 @@ pub(crate) fn confirm_remux(
 ) {
     let dialog = adw::AlertDialog::new(
         Some("Remux MKV/WebM to MP4?"),
-        Some("MP4 is the supported timeline format. The source files will be kept."),
+        Some("MP4 is the supported timeline format. The MP4 will be created beside the source. After import, you can choose whether to delete the original."),
     );
     dialog.add_responses_i18n(&[("cancel", "Cancel"), ("remux", "Remux")]);
     dialog.set_close_response("cancel");
@@ -124,6 +124,34 @@ pub(crate) fn confirm_remux(
                 show_error_dialog(&area, "Could not remux source file", &error);
             }
             area.queue_render();
+        },
+    );
+}
+
+pub(super) fn confirm_source_deletion(
+    area: &gtk::GLArea,
+    request: shrimply_timeline_skia::import_queue::SourceDeletion,
+    dialog_open: Rc<std::cell::Cell<bool>>,
+) {
+    let dialog = adw::AlertDialog::new(
+        Some("Delete original file?"),
+        Some("The file was remuxed. Delete the original to keep only the MP4 copy?"),
+    );
+    dialog.set_extra_child(Some(&gtk::Label::new(Some(&request.source().display().to_string()))));
+    dialog.add_responses_i18n(&[("keep", "Keep"), ("delete", "Delete")]);
+    dialog.set_close_response("keep");
+    dialog.set_default_response(Some("keep"));
+    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+    let response_area = area.downgrade();
+    dialog.choose(
+        Some(area.upcast_ref::<gtk::Widget>()),
+        None::<&gio::Cancellable>,
+        move |response| {
+            dialog_open.set(false);
+            let Some(area) = response_area.upgrade() else { return; };
+            if response.as_str() == "delete" && let Err(error) = request.delete() {
+                show_error_dialog(&area, "Could not delete original file", &error);
+            }
         },
     );
 }
