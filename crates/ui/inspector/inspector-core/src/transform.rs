@@ -910,12 +910,16 @@ impl InspectorController {
         times: &[Time],
         commit: InspectorCommit<'_>,
     ) -> Result<(), String> {
-        let (mut timeline, _) = self.vector2_timeline(target, path)?;
-        if !crate::keyframe_model::edit_keyframe_selection(&mut timeline, times, |value, time| {
-            Ok(crate::timeline_value::vector::vec2::delete_keyframe(
-                value, time,
-            ))
-        })? {
+        let (mut timeline, runtime) = self.vector2_timeline(target, path)?;
+        let evaluation_time = runtime
+            .local_time
+            .ok_or_else(|| "vector evaluation time is no longer available".to_string())?;
+        if !crate::keyframe_model::delete_keyframes(
+            &mut timeline,
+            times,
+            evaluation_time,
+            Time::ZERO,
+        ) {
             return Ok(());
         }
         self.replace_value_with_commit(
@@ -1081,14 +1085,16 @@ impl InspectorController {
         times: &[Time],
         commit: InspectorCommit<'_>,
     ) -> Result<(), String> {
-        let (mut timeline, _) = self.vector3_timeline(target, path)?;
-        if !crate::keyframe_model::edit_keyframe_selection(&mut timeline, times, |value, time| {
-            Ok(crate::timeline_value::vector::vec3::delete_keyframe(
-                value,
-                time,
-                Time::ZERO,
-            ))
-        })? {
+        let (mut timeline, runtime) = self.vector3_timeline(target, path)?;
+        let evaluation_time = runtime
+            .local_time
+            .ok_or_else(|| "vector evaluation time is no longer available".to_string())?;
+        if !crate::keyframe_model::delete_keyframes(
+            &mut timeline,
+            times,
+            evaluation_time,
+            Time::ZERO,
+        ) {
             return Ok(());
         }
         self.replace_value_with_commit(

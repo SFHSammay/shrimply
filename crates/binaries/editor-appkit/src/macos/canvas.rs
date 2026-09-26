@@ -927,7 +927,7 @@ impl CanvasView {
         let alert = objc2_app_kit::NSAlert::new(self.mtm());
         alert.setMessageText(&NSString::from_str("Remux MKV/WebM to MP4?"));
         alert.setInformativeText(&NSString::from_str(
-            "MP4 is the supported timeline format. The source files will be kept.",
+            "MP4 is the supported timeline format. The MP4 will be created beside the source. After import, you can choose whether to delete the original.",
         ));
         alert.addButtonWithTitle(&NSString::from_str("Remux"));
         alert.addButtonWithTitle(&NSString::from_str("Cancel"));
@@ -1211,6 +1211,19 @@ impl CanvasView {
                 }
             }
         };
+        let source_deletion = if self.ivars().imports.borrow().source_deletion_open {
+            None
+        } else if let Content::Timeline(scene) = &mut *self.ivars().content.borrow_mut() {
+            scene.take_source_deletion()
+        } else {
+            None
+        };
+        if let Some(request) = source_deletion
+            && let Err(error) =
+                super::media::confirm_source_deletion(request, &self.ivars().imports, self.mtm())
+        {
+            self.show_error(&error);
+        }
         for event in external_imports {
             self.ivars().imports.borrow_mut().finish_external(event);
         }

@@ -8,6 +8,7 @@ use shrimply_math_interpolation::Interpolation;
 use uuid::Uuid;
 
 mod controller;
+mod math;
 pub use controller::{
     FRAME_GRAPH_HEIGHT, FrameGraphAction, FrameGraphComponentAction, FrameGraphComponents,
     FrameGraphKey, FrameGraphKeyMove, FrameGraphModifiers, FrameGraphPointerButton,
@@ -18,6 +19,10 @@ pub use controller::{
 pub const GRAPH_PAD: f64 = 12.0;
 pub const STEP_GRAPH_RANGE: (f64, f64) = (-0.15, 1.15);
 pub const CURSOR_LANE_HEIGHT: f64 = 18.0;
+const STEP_KEY_RADIUS: f32 = 4.0;
+const STEP_SELECTED_KEY_RADIUS: f32 = 5.0;
+const STEP_SELECTION_OUTLINE_WIDTH: f32 = 1.0;
+const STEP_SELECTION_OUTLINE_ALPHA: f32 = 0.65;
 const SPEED_CURVE_STEPS: usize = 48;
 const CURVE_BREAK_OFFSET: f64 = 1.0 / (SPEED_CURVE_STEPS as f64 * 64.0);
 
@@ -144,107 +149,61 @@ pub fn draw_keyframes(draw: KeyframeGraphDraw<'_>) {
         shrimply_cross_ui_theme::current().view_bg,
     );
 
-    {
-        let graph_painter = painter.with_clip_rect(rect(
-            0.0,
-            CURSOR_LANE_HEIGHT,
-            width,
-            (content_height - CURSOR_LANE_HEIGHT).max(0.0),
-        ));
-        if !matches!(graph, KeyframeGraph::Step { .. }) {
-            draw_grid(&graph_painter, width, content_height, domain, frame_step);
-        }
-        match graph {
-            KeyframeGraph::Step { points } => draw_step_values(
-                GraphFrame {
-                    painter: &graph_painter,
+    let graph_painter = painter.with_clip_rect(rect(
+        0.0,
+        CURSOR_LANE_HEIGHT,
+        width,
+        (content_height - CURSOR_LANE_HEIGHT).max(0.0),
+    ));
+    if !matches!(graph, KeyframeGraph::Step { .. }) {
+        draw_grid(&graph_painter, width, content_height, domain, frame_step);
+    }
+    let frame = GraphFrame {
+        painter: &graph_painter,
+        width,
+        height: content_height,
+        domain,
+        playhead: keyframe_playhead,
+        frame_step,
+        selected_keys,
+        focused_key,
+        accent_color,
+    };
+    let range = math::graph_range(graph);
+    match graph {
+        // Discrete cells and markers are drawn after the cursor lane below.
+        KeyframeGraph::Step { .. } => {}
+        KeyframeGraph::RawValue {
+            points,
+            segments,
+            static_value,
+        } => {
+            if points.is_empty() {
+                draw_static_value(
+                    &graph_painter,
                     width,
-                    height: content_height,
-                    domain,
-                    playhead: keyframe_playhead,
-                    frame_step,
-                    selected_keys,
-                    focused_key,
+                    content_height,
+                    *static_value,
                     accent_color,
-                },
-                points,
-            ),
-            KeyframeGraph::RawValue {
-                points,
-                segments,
-                static_value,
-            } => {
-                if points.is_empty() {
-                    draw_static_value(
-                        &graph_painter,
-                        width,
-                        content_height,
-                        *static_value,
-                        accent_color,
-                    );
-                } else {
-                    draw_raw_values(
-                        GraphFrame {
-                            painter: &graph_painter,
-                            width,
-                            height: content_height,
-                            domain,
-                            playhead: keyframe_playhead,
-                            frame_step,
-                            selected_keys,
-                            focused_key,
-                            accent_color,
-                        },
-                        points,
-                        segments,
-                    );
-                }
+                );
+            } else {
+                draw_raw_values(frame, points, segments, range);
             }
-            KeyframeGraph::Speed {
-                segments,
-                keys,
-                static_value,
-            } => {
-                if segments.is_empty() {
-                    draw_static_speed(
-                        &graph_painter,
-                        width,
-                        content_height,
-                        *static_value,
-                        accent_color,
-                    );
-                    draw_speed_keys(
-                        GraphFrame {
-                            painter: &graph_painter,
-                            width,
-                            height: content_height,
-                            domain,
-                            playhead: keyframe_playhead,
-                            frame_step,
-                            selected_keys,
-                            focused_key,
-                            accent_color,
-                        },
-                        keys,
-                        *static_value,
-                    );
-                } else {
-                    draw_speed_segments(
-                        GraphFrame {
-                            painter: &graph_painter,
-                            width,
-                            height: content_height,
-                            domain,
-                            playhead: keyframe_playhead,
-                            frame_step,
-                            selected_keys,
-                            focused_key,
-                            accent_color,
-                        },
-                        segments,
-                        keys,
-                    );
-                }
+        }
+        KeyframeGraph::Speed {
+            segments,
+            keys,
+            static_value,
+        } => {
+            if segments.is_empty() {
+                draw_static_line(
+                    &graph_painter,
+                    width,
+                    value_y(*static_value, content_height, range),
+                    accent_color,
+                );
+            } else {
+                draw_speed_segments(frame, segments, keys, range);
             }
         }
     }
@@ -255,22 +214,20 @@ pub fn draw_keyframes(draw: KeyframeGraphDraw<'_>) {
         StrokeKind::Inside,
     );
     draw_cursor_lane(painter, width, domain, frame_step, accent_color);
-    if let KeyframeGraph::Step { points } = graph {
-        draw_bool_keys(
-            GraphFrame {
-                painter,
-                width,
-                height: content_height,
-                domain,
-                playhead: keyframe_playhead,
-                frame_step,
-                selected_keys,
-                focused_key,
-                accent_color,
-            },
-            points,
-        );
+    if matches!(graph, KeyframeGraph::Step { .. }) {
+        shrimply_discrete_keyframe_graph_skia::draw(shrimply_discrete_keyframe_graph_skia::Draw {
+            painter,
+            width,
+            content_height,
+            ruler_height: CURSOR_LANE_HEIGHT,
+            domain,
+            frame_step,
+            border_color: shrimply_cross_ui_theme::current().sidebar_border,
+            foreground_color: shrimply_cross_ui_theme::current().view_fg,
+            shade_color: shrimply_cross_ui_theme::current().sidebar_shade,
+        });
     }
+    draw_graph_markers(frame, graph);
     if let Some(virtual_playhead) = virtual_playhead {
         draw_virtual_playhead(
             painter,
@@ -322,29 +279,6 @@ fn draw_virtual_playhead(
     }
 }
 
-fn draw_step_values(_frame: GraphFrame<'_>, _points: &[KeyframePoint]) {}
-
-fn draw_bool_keys(frame: GraphFrame<'_>, points: &[KeyframePoint]) {
-    let graph = shrimply_discrete_keyframe_graph_skia::Graph::new(
-        points.iter().map(|point| point.time).collect(),
-    );
-    shrimply_discrete_keyframe_graph_skia::draw(shrimply_discrete_keyframe_graph_skia::Draw {
-        painter: frame.painter,
-        width: frame.width,
-        content_height: frame.height,
-        ruler_height: CURSOR_LANE_HEIGHT,
-        graph: &graph,
-        domain: frame.domain,
-        frame_step: frame.frame_step,
-        playhead: frame.playhead,
-        selected_keys: frame.selected_keys,
-        focused_key: frame.focused_key,
-        accent_color: frame.accent_color,
-        border_color: shrimply_cross_ui_theme::current().sidebar_border,
-        foreground_color: shrimply_cross_ui_theme::current().view_fg,
-        shade_color: shrimply_cross_ui_theme::current().sidebar_shade,
-    });
-}
 fn draw_graph_overscroll(
     painter: &TimelinePainter,
     width: f64,
@@ -512,12 +446,16 @@ fn nice_tick_step(raw: f64) -> f64 {
     magnitude * 10.0
 }
 
-fn draw_raw_values(frame: GraphFrame<'_>, points: &[KeyframePoint], segments: &[RawSegment]) {
+fn draw_raw_values(
+    frame: GraphFrame<'_>,
+    points: &[KeyframePoint],
+    segments: &[RawSegment],
+    range: (f64, f64),
+) {
     let painter = frame.painter;
     let width = frame.width;
     let height = frame.height;
     let domain = frame.domain;
-    let range = raw_range(points, segments);
     let mut path = PathBuilder::new();
     if let Some(first) = points.first() {
         let (_, first_y) = raw_point(*first, width, height, domain, range);
@@ -550,45 +488,18 @@ fn draw_raw_values(frame: GraphFrame<'_>, points: &[KeyframePoint], segments: &[
         path.line_to(((width - GRAPH_PAD) as f32, last_y as f32));
     }
     painter.path_stroke(&path.snapshot(), Stroke::new(2.0, frame.accent_color));
-
-    for point in points {
-        let (px, py) = raw_point(*point, width, height, domain, range);
-        draw_keyframe_diamond(
-            painter,
-            px,
-            py,
-            key_selected(frame, point.time),
-            frame.accent_color,
-        );
-    }
 }
 
-fn draw_speed_segments(frame: GraphFrame<'_>, segments: &[SpeedSegment], keys: &[Time]) {
-    let range = speed_range(segments);
+fn draw_speed_segments(
+    frame: GraphFrame<'_>,
+    segments: &[SpeedSegment],
+    keys: &[Time],
+    range: (f64, f64),
+) {
     draw_speed_baseline(frame.painter, frame.width, frame.height, range);
     draw_speed_holds(frame, keys, range);
     for segment in segments {
         draw_speed_curve(frame, segment, range);
-        let start_speed = segment_speed_at(segment, 0.0).unwrap_or(0.0);
-        let end_speed = segment_speed_at(segment, 1.0).unwrap_or(0.0);
-        let x0 = time_x(segment.start, frame.width, frame.domain);
-        let x1 = time_x(segment.end, frame.width, frame.domain);
-        let y0 = value_y(start_speed, frame.height, range);
-        let y1 = value_y(end_speed, frame.height, range);
-        draw_keyframe_diamond(
-            frame.painter,
-            x0,
-            y0,
-            key_selected(frame, segment.start),
-            frame.accent_color,
-        );
-        draw_keyframe_diamond(
-            frame.painter,
-            x1,
-            y1,
-            key_selected(frame, segment.end),
-            frame.accent_color,
-        );
     }
 }
 
@@ -699,17 +610,6 @@ fn draw_static_value(
     draw_static_line(painter, width, y, accent_color);
 }
 
-fn draw_static_speed(
-    painter: &TimelinePainter,
-    width: f64,
-    height: f64,
-    value: f64,
-    accent_color: Color,
-) {
-    let y = value_y(value, height, (0.0, value.max(1.0)));
-    draw_static_line(painter, width, y, accent_color);
-}
-
 fn draw_static_line(painter: &TimelinePainter, width: f64, y: f64, accent_color: Color) {
     painter.line_segment(
         [
@@ -720,20 +620,46 @@ fn draw_static_line(painter: &TimelinePainter, width: f64, y: f64, accent_color:
     );
 }
 
-fn draw_speed_keys(frame: GraphFrame<'_>, keys: &[Time], value: f64) {
-    let painter = frame.painter;
-    let width = frame.width;
-    let height = frame.height;
-    let domain = frame.domain;
-    let y = value_y(value, height, (0.0, value.max(1.0)));
-    for time in keys {
-        draw_keyframe_diamond(
-            painter,
-            time_x(*time, width, domain),
-            y,
-            key_selected(frame, *time),
-            frame.accent_color,
-        );
+fn draw_graph_markers(frame: GraphFrame<'_>, graph: &KeyframeGraph) {
+    for (time, position) in math::keyframe_positions(
+        graph,
+        frame.domain,
+        frame.width,
+        frame.height,
+        frame.frame_step,
+    ) {
+        let selected = key_selected(frame, time);
+        if matches!(graph, KeyframeGraph::Step { .. }) {
+            let radius = if selected {
+                STEP_SELECTED_KEY_RADIUS
+            } else {
+                STEP_KEY_RADIUS
+            };
+            let center = vec2(position.x as f32, position.y as f32);
+            frame
+                .painter
+                .circle_filled(center, radius, frame.accent_color);
+            if selected {
+                frame.painter.circle_stroke(
+                    center,
+                    radius + STEP_SELECTION_OUTLINE_WIDTH,
+                    Stroke::new(
+                        STEP_SELECTION_OUTLINE_WIDTH,
+                        frame
+                            .accent_color
+                            .alpha_multiply(STEP_SELECTION_OUTLINE_ALPHA),
+                    ),
+                );
+            }
+        } else {
+            draw_keyframe_diamond(
+                frame.painter,
+                position.x,
+                position.y,
+                selected,
+                frame.accent_color,
+            );
+        }
     }
 }
 

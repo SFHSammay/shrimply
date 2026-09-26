@@ -419,6 +419,29 @@ pub fn edit_keyframe_selection<T: Clone>(
     Ok(changed)
 }
 
+pub fn delete_keyframes<T: TimelineValueType>(
+    value: &mut TimelineValue<T>,
+    times: &[Time],
+    evaluation_time: Time,
+    frame_step: Time,
+) -> bool {
+    let current = value.value_at(evaluation_time);
+    let TimelineBase::Keyframes(keyframes) = &mut value.base else {
+        return false;
+    };
+    let previous_len = keyframes.len();
+    keyframes.retain(|keyframe| {
+        !times
+            .iter()
+            .any(|time| same_frame(keyframe.time(), *time, frame_step))
+    });
+    let changed = keyframes.len() != previous_len;
+    if changed && keyframes.is_empty() {
+        value.base = TimelineBase::Const(current);
+    }
+    changed
+}
+
 pub fn delete_discrete_keyframe<T: TimelineValueType>(
     value: &mut TimelineValue<T>,
     time: Time,

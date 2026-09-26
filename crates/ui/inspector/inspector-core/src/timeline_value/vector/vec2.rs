@@ -102,20 +102,7 @@ pub fn add_keyframe(value: &mut Vec2Timeline, time: Time) -> bool {
 }
 
 pub fn delete_keyframe(value: &mut Vec2Timeline, time: Time) -> bool {
-    let TimelineBase::Keyframes(keyframes) = &mut value.base else {
-        return false;
-    };
-    let Some(index) = keyframes
-        .iter()
-        .position(|keyframe| keyframe.time.approx_eq(time))
-    else {
-        return false;
-    };
-    keyframes.remove(index);
-    if keyframes.is_empty() {
-        value.base = TimelineBase::Const(Vec2::ZERO);
-    }
-    true
+    keyframe_model::delete_discrete_keyframe(value, time, Time::ZERO)
 }
 
 pub fn move_keyframes(value: &mut Vec2Timeline, moves: &[(Time, Time)]) -> bool {

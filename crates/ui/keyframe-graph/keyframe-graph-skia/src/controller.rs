@@ -16,8 +16,9 @@ use uuid::Uuid;
 
 use crate::{
     CURSOR_LANE_HEIGHT, GRAPH_PAD, GraphDomain, KeyframeGraph, KeyframeGraphDraw, KeyframePoint,
-    RawSegment, STEP_GRAPH_RANGE, draw_keyframes, graph_value_at, raw_point, raw_range,
-    segment_speed_at, speed_range, time_x, value_y,
+    RawSegment, draw_keyframes, graph_value_at,
+    math::{graph_points, graph_range, keyframe_positions},
+    raw_range, segment_speed_at, speed_range, time_x, value_y,
 };
 
 pub const GRAPH_SLIDER_HEIGHT: f64 = 20.0;
@@ -740,7 +741,7 @@ impl FrameGraphState {
                 x,
                 y,
             )
-            .map(|point| DragTarget::Point(point.time))
+            .map(DragTarget::Point)
         };
         let mut actions = Vec::new();
         match target {
@@ -1243,12 +1244,13 @@ impl FrameGraphState {
     }
 
     fn copy_selected(&mut self) {
-        let points = graph_key_points(&self.graph);
+        let points = graph_points(&self.graph);
         let mut copied: Vec<_> = points
             .into_iter()
             .filter(|point| key_is_selected(&self.selected_keys, point.time))
             .collect();
         copied.sort_by_key(|point| point.time);
+        copied.dedup_by(|left, right| left.time.approx_eq(right.time));
         let Some(origin) = copied.first().map(|point| point.time) else {
             self.clipboard.clear();
             return;
@@ -1430,16 +1432,6 @@ fn value_at_y(y: f64, height: f64, (minimum, maximum): (f64, f64)) -> f64 {
     minimum + (height - GRAPH_PAD - y) / (height - GRAPH_PAD * 2.0) * span
 }
 
-fn graph_range(graph: &KeyframeGraph) -> (f64, f64) {
-    match graph {
-        KeyframeGraph::Step { .. } => STEP_GRAPH_RANGE,
-        KeyframeGraph::RawValue {
-            points, segments, ..
-        } => raw_range(points, segments),
-        KeyframeGraph::Speed { segments, .. } => speed_range(segments),
-    }
-}
-
 fn graph_edit_value(graph: &KeyframeGraph, value: f64) -> f64 {
     match graph {
         KeyframeGraph::Step { .. } => value.clamp(0.0, 1.0),
@@ -1466,47 +1458,6 @@ fn next_key(times: &[Time], playhead: Time) -> Option<Time> {
         .find(|time| *time > playhead && !time.approx_eq(playhead))
 }
 
-fn graph_key_points(graph: &KeyframeGraph) -> Vec<KeyframePoint> {
-    match graph {
-        KeyframeGraph::Step { points } | KeyframeGraph::RawValue { points, .. } => points.clone(),
-        KeyframeGraph::Speed {
-            segments,
-            keys,
-            static_value,
-        } if segments.is_empty() => keys
-            .iter()
-            .map(|time| KeyframePoint {
-                time: *time,
-                value: *static_value,
-            })
-            .collect(),
-        KeyframeGraph::Speed { segments, .. } => {
-            let mut points = Vec::new();
-            for segment in segments {
-                points.extend([
-                    KeyframePoint {
-                        time: segment.start,
-                        value: segment_speed_at(segment, 0.0).unwrap_or(0.0),
-                    },
-                    KeyframePoint {
-                        time: segment.end,
-                        value: segment_speed_at(segment, 1.0).unwrap_or(0.0),
-                    },
-                ]);
-            }
-            points.sort_by_key(|point| point.time);
-            points.dedup_by_key(|point| point.time);
-            points
-        }
-    }
-}
-
-fn graph_key_point(graph: &KeyframeGraph, time: Time) -> Option<KeyframePoint> {
-    graph_key_points(graph)
-        .into_iter()
-        .find(|point| point.time.approx_eq(time))
-}
-
 fn hit_graph_point(
     graph: &KeyframeGraph,
     domain: GraphDomain,
@@ -1515,27 +1466,14 @@ fn hit_graph_point(
     frame_step: Time,
     x: f64,
     y: f64,
-) -> Option<KeyframePoint> {
-    let points = graph_key_points(graph);
-    let range = graph_range(graph);
-    points
-        .into_iter()
-        .filter_map(|point| {
-            let (point_x, point_y) = if matches!(graph, KeyframeGraph::Step { .. }) {
-                (
-                    shrimply_discrete_keyframe_graph_skia::key_x(
-                        point.time, width, domain, frame_step,
-                    ),
-                    shrimply_discrete_keyframe_graph_skia::key_y(height, CURSOR_LANE_HEIGHT),
-                )
-            } else {
-                raw_point(point, width, height, domain, range)
-            };
-            let distance = (point_x - x).hypot(point_y - y);
-            (distance <= HIT_RADIUS).then_some((distance, point))
+) -> Option<Time> {
+    keyframe_positions(graph, domain, width, height, frame_step)
+        .filter_map(|(time, position)| {
+            let distance = position.distance(glam::DVec2::new(x, y));
+            (distance <= HIT_RADIUS).then_some((distance, time))
         })
         .min_by(|left, right| left.0.total_cmp(&right.0))
-        .map(|(_, point)| point)
+        .map(|(_, time)| time)
 }
 
 fn set_key_selection(
@@ -1575,28 +1513,19 @@ fn select_keys_in_box(
     let right = selection_box.start_x.max(selection_box.end_x);
     let top = selection_box.start_y.min(selection_box.end_y);
     let bottom = selection_box.start_y.max(selection_box.end_y);
-    let range = graph_range(graph);
     let mut selected = if selection_box.add_to_selection {
         previous_selection.to_vec()
     } else {
         Vec::new()
     };
-    for point in graph_key_points(graph) {
-        let (x, y) = if matches!(graph, KeyframeGraph::Step { .. }) {
-            (
-                shrimply_discrete_keyframe_graph_skia::key_x(point.time, width, domain, frame_step),
-                shrimply_discrete_keyframe_graph_skia::key_y(height, CURSOR_LANE_HEIGHT),
-            )
-        } else {
-            raw_point(point, width, height, domain, range)
-        };
-        if x >= left
-            && x <= right
-            && y >= top
-            && y <= bottom
-            && !key_is_selected(&selected, point.time)
+    for (time, position) in keyframe_positions(graph, domain, width, height, frame_step) {
+        if position.x >= left
+            && position.x <= right
+            && position.y >= top
+            && position.y <= bottom
+            && !key_is_selected(&selected, time)
         {
-            selected.push(point.time);
+            selected.push(time);
         }
     }
     selected.sort();
@@ -1612,7 +1541,8 @@ fn move_selected_graph_points(
     requested_value: f64,
     item_range: GraphDomain,
 ) -> (Vec<(Time, Time, f64)>, Vec<Time>, Time) {
-    let Some(focus_point) = graph_key_point(graph, focus_time) else {
+    let points = graph_points(graph);
+    let Some(focus_point) = points.iter().find(|point| point.time.approx_eq(focus_time)) else {
         return (Vec::new(), selected_times.to_vec(), focus_time);
     };
     let selected_times = if key_is_selected(selected_times, focus_time) {
@@ -1634,7 +1564,7 @@ fn move_selected_graph_points(
     };
     let mut updates = Vec::new();
     for old_time in &selected_times {
-        if let Some(point) = graph_key_point(graph, *old_time) {
+        if let Some(point) = points.iter().find(|point| point.time.approx_eq(*old_time)) {
             updates.push((
                 point.time,
                 Time::from_seconds_f64(point.time.as_secs_f64() + delta),

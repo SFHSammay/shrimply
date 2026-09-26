@@ -101,7 +101,9 @@ pub(crate) fn confirm_remux(
 ) {
     let dialog = adw::AlertDialog::new(
         Some("Remux MKV/WebM to MP4?"),
-        Some("MP4 is the supported timeline format. The MP4 will be created beside the source. After import, you can choose whether to delete the original."),
+        Some(
+            "MP4 is the supported timeline format. The MP4 will be created beside the source. After import, you can choose whether to delete the original.",
+        ),
     );
     dialog.add_responses_i18n(&[("cancel", "Cancel"), ("remux", "Remux")]);
     dialog.set_close_response("cancel");
@@ -137,7 +139,13 @@ pub(super) fn confirm_source_deletion(
         Some("Delete original file?"),
         Some("The file was remuxed. Delete the original to keep only the MP4 copy?"),
     );
-    dialog.set_extra_child(Some(&gtk::Label::new(Some(&request.source().display().to_string()))));
+    dialog.set_extra_child(Some(
+        &gtk::Label::builder()
+            .label(request.source().display().to_string())
+            .wrap(true)
+            .selectable(true)
+            .build(),
+    ));
     dialog.add_responses_i18n(&[("keep", "Keep"), ("delete", "Delete")]);
     dialog.set_close_response("keep");
     dialog.set_default_response(Some("keep"));
@@ -148,8 +156,12 @@ pub(super) fn confirm_source_deletion(
         None::<&gio::Cancellable>,
         move |response| {
             dialog_open.set(false);
-            let Some(area) = response_area.upgrade() else { return; };
-            if response.as_str() == "delete" && let Err(error) = request.delete() {
+            let Some(area) = response_area.upgrade() else {
+                return;
+            };
+            if response.as_str() == "delete"
+                && let Err(error) = request.delete()
+            {
                 show_error_dialog(&area, "Could not delete original file", &error);
             }
         },

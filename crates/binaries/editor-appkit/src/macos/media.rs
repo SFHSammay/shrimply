@@ -8,24 +8,22 @@ use shrimply_cross_ui_core::editor::EditorSession;
 use shrimply_editor_state::{player_state, preferences};
 use shrimply_timeline_skia::{
     DragCollisionMode, TrackKey, import,
-    import_queue::{ImportQueue, ImportStart, Placement},
+    import_queue::{ImportQueue, ImportStart, Placement, SourceDeletion},
     items::NewItemTarget,
 };
 use std::path::PathBuf;
 
 pub(super) struct ScopedUrl {
     url: Retained<NSURL>,
-    path: PathBuf,
     scoped: bool,
 }
 
 impl ScopedUrl {
     pub(super) fn new(url: Retained<NSURL>) -> Self {
-        let path = url
-            .to_file_path()
+        url.to_file_path()
             .expect("security-scoped URL must be a local file URL");
         let scoped = unsafe { url.startAccessingSecurityScopedResource() };
-        Self { url, path, scoped }
+        Self { url, scoped }
     }
 }
 
@@ -41,6 +39,7 @@ impl Drop for ScopedUrl {
 #[derive(Default)]
 pub struct Imports {
     queue: ImportQueue,
+    pub(super) source_deletion_open: bool,
     urls: Vec<ScopedUrl>,
     pending_urls: Vec<(
         shrimply_timeline_skia::import_queue::BatchId,
@@ -98,7 +97,7 @@ impl Imports {
         &mut self,
         event: shrimply_timeline_skia::external_content::ExternalImportEvent,
     ) {
-        self.finish_scopes(event.batch, event.retained_paths.as_deref());
+        self.finish_scopes(event.batch, event.retained_paths.is_some());
     }
 
     pub fn poll(&mut self, session: &EditorSession) -> Result<(), String> {
@@ -108,10 +107,9 @@ impl Imports {
                 return Ok(());
             };
             let succeeded = completion.result.is_ok();
-            let paths = completion.paths.clone();
             let batch = completion.batch;
             if completion.cancelled {
-                self.finish_scopes(batch, None);
+                self.finish_scopes(batch, false);
                 continue;
             }
             let result = import::finish_track_import(
@@ -119,16 +117,19 @@ impl Imports {
                 &session.selection_state,
                 completion.result,
             );
-            self.finish_scopes(batch, succeeded.then_some(paths.as_slice()));
+            self.finish_scopes(batch, succeeded);
             result?;
         }
     }
 
-    fn finish_scopes(
-        &mut self,
-        batch: shrimply_timeline_skia::import_queue::BatchId,
-        retained_paths: Option<&[PathBuf]>,
-    ) {
+    pub(super) fn take_source_deletion(&mut self) -> Option<SourceDeletion> {
+        if self.source_deletion_open {
+            return None;
+        }
+        self.queue.take_source_deletion()
+    }
+
+    fn finish_scopes(&mut self, batch: shrimply_timeline_skia::import_queue::BatchId, keep: bool) {
         let Some(index) = self
             .pending_urls
             .iter()
@@ -137,14 +138,33 @@ impl Imports {
             return;
         };
         let (_, scopes) = self.pending_urls.swap_remove(index);
-        if let Some(paths) = retained_paths {
-            self.urls.extend(
-                scopes
-                    .into_iter()
-                    .filter(|scope| paths.contains(&scope.path)),
-            );
+        if keep {
+            // Remuxed imports still need access to the original for the deletion prompt.
+            self.urls.extend(scopes);
         }
     }
+}
+
+pub(super) fn confirm_source_deletion(
+    request: SourceDeletion,
+    imports: &std::cell::RefCell<Imports>,
+    mtm: MainThreadMarker,
+) -> Result<(), String> {
+    imports.borrow_mut().source_deletion_open = true;
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Delete original file?"));
+    alert.setInformativeText(&NSString::from_str(&format!(
+        "The file was remuxed. Delete the original to keep only the MP4 copy?\n\n{}",
+        request.source().display(),
+    )));
+    alert.addButtonWithTitle(&NSString::from_str("Keep"));
+    alert.addButtonWithTitle(&NSString::from_str("Delete"));
+    let delete = alert.runModal() == objc2_app_kit::NSAlertSecondButtonReturn;
+    imports.borrow_mut().source_deletion_open = false;
+    if delete {
+        request.delete()?;
+    }
+    Ok(())
 }
 
 pub(super) fn scoped_file_urls(
@@ -276,7 +296,7 @@ pub fn choose_files(
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str("Remux MKV/WebM to MP4?"));
         alert.setInformativeText(&NSString::from_str(
-            "MP4 is the supported timeline format. The source files will be kept.",
+            "MP4 is the supported timeline format. The MP4 will be created beside the source. After import, you can choose whether to delete the original.",
         ));
         alert.addButtonWithTitle(&NSString::from_str("Remux"));
         alert.addButtonWithTitle(&NSString::from_str("Cancel"));

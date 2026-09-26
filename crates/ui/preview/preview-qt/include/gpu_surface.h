@@ -46,6 +46,7 @@ public:
     Q_INVOKABLE void activateTrackAddMenuItem(int index);
     Q_INVOKABLE void importTrackFile(const QUrl &url);
     Q_INVOKABLE void confirmTrackRemux(bool remux);
+    Q_INVOKABLE void confirmSourceDeletion(bool remove);
     Q_INVOKABLE void setContextMenuControl(int index, qreal value);
     Q_INVOKABLE void saveContextFrame(const QUrl &url);
     Q_INVOKABLE void deleteContextFoldedTrack();
@@ -61,6 +62,7 @@ signals:
     void trackAddMenuRequested(qreal x, qreal y);
     void trackImportRequested();
     void trackRemuxRequested();
+    void sourceDeletionRequested(const QString &path);
     void saveFrameRequested();
     void contextActionFailed(const QString &message);
     void deleteTrackRequested(int clipCount);

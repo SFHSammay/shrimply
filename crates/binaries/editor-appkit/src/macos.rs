@@ -261,6 +261,12 @@ define_class!(
                 self.ivars().imports.borrow_mut().poll(session)
             };
             if let Err(error) = imported { self.show_error(&error); }
+            let source_deletion = self.ivars().imports.borrow_mut().take_source_deletion();
+            if let Some(request) = source_deletion
+                && let Err(error) = media::confirm_source_deletion(request, &self.ivars().imports, self.mtm())
+            {
+                self.show_error(&error);
+            }
             let update = {
                 let _timing = shrimply_process_reporting::diagnostics::timing("Session polling and view-state queue");
                 session.poll()

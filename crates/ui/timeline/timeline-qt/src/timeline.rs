@@ -317,18 +317,25 @@ impl ToolkitTimeline {
             .or_else(|| self.scene.take_error())
     }
 
-    pub fn take_source_deletion(&mut self) -> Option<PathBuf> {
+    pub fn take_source_deletion(&mut self) -> bool {
         if self.source_deletion.is_some() {
-            return None;
+            return false;
         }
-        let request = self.scene.take_source_deletion()?;
-        let path = request.source().to_path_buf();
-        self.source_deletion = Some(request);
-        Some(path)
+        self.source_deletion = self.scene.take_source_deletion();
+        self.source_deletion.is_some()
+    }
+
+    pub fn source_deletion_path(&self) -> Option<&std::path::Path> {
+        self.source_deletion
+            .as_ref()
+            .map(|request| request.source())
     }
 
     pub fn confirm_source_deletion(&mut self, delete: bool) -> Result<(), String> {
-        let request = self.source_deletion.take().ok_or("Source deletion request is no longer active")?;
+        let request = self
+            .source_deletion
+            .take()
+            .ok_or("Source deletion request is no longer active")?;
         if delete {
             request.delete()?;
         }

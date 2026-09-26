@@ -762,10 +762,7 @@ pub fn vtt_ranges(path: &Path) -> Result<Vec<(Time, Time)>, String> {
 }
 
 pub fn remux_mkv_to_mp4(input: &Path) -> Result<PathBuf, String> {
-    let file = remux_to_mp4(
-        input,
-        shrimply_resource_pipeline::CancelToken::default(),
-    )?;
+    let file = remux_to_mp4(input, shrimply_resource_pipeline::CancelToken::default())?;
     let path = file.path().to_path_buf();
     file.keep();
     Ok(path)
@@ -777,10 +774,17 @@ pub(crate) fn remux_to_mp4(
 ) -> Result<crate::external_content::OwnedFile, String> {
     let mut path = input.with_extension("mp4");
     loop {
-        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(_) => break,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let mut name = input.file_stem().ok_or("source has no filename")?.to_os_string();
+                let mut name = input
+                    .file_stem()
+                    .ok_or("source has no filename")?
+                    .to_os_string();
                 name.push(format!("-{}.mp4", uuid::Uuid::new_v4()));
                 path = input.with_file_name(name);
             }

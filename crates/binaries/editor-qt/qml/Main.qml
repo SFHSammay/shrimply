@@ -712,6 +712,10 @@ ApplicationWindow {
                 timelineLoader.item.importTrackFile(selected)
         }
         function onTrackRemuxRequested() { timelineRemuxDialog.open() }
+        function onSourceDeletionRequested(path) {
+            timelineSourceDeletionDialog.sourcePath = path
+            timelineSourceDeletionDialog.open()
+        }
         function onSaveFrameRequested() {
             const selected = backend.showFileSaveDialog(
                 "",
@@ -742,9 +746,12 @@ ApplicationWindow {
         title: backend.translate("Remux MKV/WebM to MP4?")
         modal: true
         anchors.centerIn: parent
+        closePolicy: Popup.CloseOnEscape
+        onAccepted: timelineLoader.item.confirmTrackRemux(true)
+        onRejected: timelineLoader.item.confirmTrackRemux(false)
 
         contentItem: Label {
-            text: backend.translate("MP4 is the supported timeline format. The source file will be kept.")
+            text: backend.translate("MP4 is the supported timeline format. The MP4 will be created beside the source. After import, you can choose whether to delete the original.")
             wrapMode: Text.Wrap
         }
         footer: DialogButtonBox {
@@ -757,14 +764,39 @@ ApplicationWindow {
                 highlighted: true
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
-            onRejected: {
-                timelineRemuxDialog.close()
-                timelineLoader.item.confirmTrackRemux(false)
+            onRejected: timelineRemuxDialog.reject()
+            onAccepted: timelineRemuxDialog.accept()
+        }
+    }
+
+    Dialog {
+        id: timelineSourceDeletionDialog
+        property string sourcePath: ""
+        title: backend.translate("Delete original file?")
+        modal: true
+        anchors.centerIn: parent
+        closePolicy: Popup.CloseOnEscape
+        contentItem: Label {
+            text: backend.translate("The file was remuxed. Delete the original to keep only the MP4 copy?") + "\n\n" + timelineSourceDeletionDialog.sourcePath
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+        }
+        onOpened: keepOriginalButton.forceActiveFocus()
+        onAccepted: timelineLoader.item.confirmSourceDeletion(true)
+        onRejected: timelineLoader.item.confirmSourceDeletion(false)
+        footer: DialogButtonBox {
+            Button {
+                id: keepOriginalButton
+                text: backend.translate("Keep")
+                highlighted: true
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
             }
-            onAccepted: {
-                timelineRemuxDialog.close()
-                timelineLoader.item.confirmTrackRemux(true)
+            Button {
+                text: backend.translate("Delete")
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
+            onRejected: timelineSourceDeletionDialog.reject()
+            onAccepted: timelineSourceDeletionDialog.accept()
         }
     }
 

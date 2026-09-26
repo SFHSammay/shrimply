@@ -56,8 +56,10 @@ the import targets all selected tracks of the same type.
 
 Video and audio files can only be imported to video or audio tracks. WebVTT
 files can only be imported to caption tracks. MKV and WebM imports ask for
-confirmation before losslessly remuxing to MP4. The timeline uses the MP4 copy,
-and the original file is kept.
+confirmation before losslessly remuxing to MP4 in the source file's directory.
+An existing MP4 is never overwritten. The timeline uses the new MP4, and after
+a successful import a dialog offers to keep or delete the original. Keeping the
+original is the default; cancelling or failing the import never deletes it.
 
 Supported formats
 ~~~~~~~~~~~~~~~~~

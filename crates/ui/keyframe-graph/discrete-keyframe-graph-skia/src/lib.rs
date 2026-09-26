@@ -4,83 +4,25 @@ use shrimply_math_core::{Time, fraction_floor_i64, fraction_from_integer};
 
 pub const CONTENT_HEIGHT: i32 = 52;
 pub const MAX_FRAME_WIDTH: f64 = 48.0;
-const KEY_RADIUS: f32 = 4.0;
-const SELECTED_KEY_RADIUS: f32 = 5.0;
 const FRAME_CELL_MIN_WIDTH: f64 = 6.0;
 const FRAME_LABEL_MIN_WIDTH: f64 = 64.0;
 const GRAPH_PAD: f64 = 12.0;
 const FRAME_LABEL_ALPHA: f32 = 0.7;
 const FRAME_SHADE_ALPHA: f32 = 0.22;
 
-#[derive(Clone, Default)]
-pub struct Graph {
-    keys: Vec<Time>,
-}
-
-impl Graph {
-    pub fn new(mut keys: Vec<Time>) -> Self {
-        keys.sort();
-        keys.dedup_by(|left, right| left.approx_eq(*right));
-        Self { keys }
-    }
-
-    pub fn keys(&self) -> &[Time] {
-        &self.keys
-    }
-}
-
 pub struct Draw<'a> {
     pub painter: &'a TimelinePainter,
     pub width: f64,
     pub content_height: f64,
     pub ruler_height: f64,
-    pub graph: &'a Graph,
     pub domain: (Time, Time),
     pub frame_step: Time,
-    pub playhead: Time,
-    pub selected_keys: &'a [Time],
-    pub focused_key: Option<Time>,
-    pub accent_color: Color,
     pub border_color: Color,
     pub foreground_color: Color,
     pub shade_color: Color,
 }
 
 pub fn draw(draw: Draw<'_>) {
-    draw_frame_cells(&draw);
-    let y = key_y(draw.content_height, draw.ruler_height);
-    for time in draw.graph.keys() {
-        let x = key_x(*time, draw.width, draw.domain, draw.frame_step);
-        if x < GRAPH_PAD || x > draw.width - GRAPH_PAD {
-            continue;
-        }
-        let selected = same_frame(*time, draw.playhead, draw.frame_step)
-            || draw
-                .focused_key
-                .is_some_and(|focused| focused.approx_eq(*time))
-            || draw
-                .selected_keys
-                .iter()
-                .any(|selected| selected.approx_eq(*time));
-        let radius = if selected {
-            SELECTED_KEY_RADIUS
-        } else {
-            KEY_RADIUS
-        };
-        let color = draw.accent_color;
-        draw.painter
-            .circle_filled(vec2(x as f32, y as f32), radius, color);
-        if selected {
-            draw.painter.circle_stroke(
-                vec2(x as f32, y as f32),
-                radius + 1.0,
-                Stroke::new(1.0, color.alpha_multiply(0.65)),
-            );
-        }
-    }
-}
-
-fn draw_frame_cells(draw: &Draw<'_>) {
     if draw.frame_step <= Time::ZERO {
         return;
     }
@@ -171,8 +113,4 @@ fn seconds_per_pixel(width: f64, domain: (Time, Time)) -> f64 {
         .as_secs_f64()
         .max(f64::EPSILON)
         / (width - GRAPH_PAD * 2.0).max(1.0)
-}
-
-fn same_frame(left: Time, right: Time, frame_step: Time) -> bool {
-    left.snapped(frame_step) == right.snapped(frame_step)
 }
