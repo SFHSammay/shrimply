@@ -510,16 +510,19 @@ ApplicationWindow {
                             onClicked: if (timelineLoader.item) timelineLoader.item.magnetEnabled = checked
                         }
                         ToolButton {
-                            icon.name: "view-grid"
+                            icon.name: "metronome-symbolic"
                             text: backend.translate("Beat Grid")
                             display: AbstractButton.IconOnly
                             checkable: true
                             Binding on checked { value: timelineLoader.item ? timelineLoader.item.beatGridEnabled : false }
                             onClicked: if (timelineLoader.item) timelineLoader.item.beatGridEnabled = checked
                         }
-                        ToolSeparator {}
+                        ToolSeparator {
+                            orientation: Qt.platform.os === "windows" ? Qt.Horizontal : Qt.Vertical
+                            Layout.fillWidth: Qt.platform.os === "windows"
+                        }
                         ToolButton {
-                            icon.name: "edit-select"
+                            icon.name: "pointer-primary-click-symbolic"
                             text: backend.translate("Pointer")
                             display: AbstractButton.IconOnly
                             checkable: true
@@ -540,7 +543,10 @@ ApplicationWindow {
                             onClicked: if (checked && timelineLoader.item)
                                 timelineLoader.item.cutEnabled = true
                         }
-                        ToolSeparator {}
+                        ToolSeparator {
+                            orientation: Qt.platform.os === "windows" ? Qt.Horizontal : Qt.Vertical
+                            Layout.fillWidth: Qt.platform.os === "windows"
+                        }
                         ToolButton {
                             icon.name: "timeline-mode-overwrite"
                             text: backend.translate("Overwrite/Insert")
@@ -637,7 +643,7 @@ ApplicationWindow {
 
     Menu {
         id: timelineContextMenu
-        popupType: Popup.Window
+        popupType: Qt.platform.os === "windows" ? Popup.Item : Popup.Window
 
         Instantiator {
             model: timelineLoader.item ? timelineLoader.item.contextMenuItems : []
