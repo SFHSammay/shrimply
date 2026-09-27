@@ -18,7 +18,6 @@ INSTALL ?= install
 PKG_CONFIG ?= $(if $(filter Windows_NT,$(HOST_OS)),pkg-config,/usr/bin/pkg-config)
 PKG_CONFIG_PATH ?= /usr/lib64/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
 QT_QMAKE ?= $(if $(filter Windows_NT,$(HOST_OS)),qmake.exe,qmake6)
-WINDOWS_BASH ?= C:/Program Files/Git/bin/bash.exe
 BUILD_ENV = CUDA_HOME="$(CUDA_HOME)" CUDA_TOOLKIT_PATH="$(CUDA_TOOLKIT_PATH)" CUDA_IMAGE_FORMAT=$(CUDA_IMAGE_FORMAT) CUDA_TARGET=$(CUDA_TARGET) CUDA_PTX_TARGET=$(CUDA_PTX_TARGET) CUDA_HOST_CXX=$(CUDA_HOST_CXX) CUDA_ALLOW_UNSUPPORTED_COMPILER=$(CUDA_ALLOW_UNSUPPORTED_COMPILER) PKG_CONFIG="$(PKG_CONFIG)" PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" OPTIX_ROOT="$(OPTIX_ROOT)"
 ifneq ($(HOST_OS),Windows_NT)
 BUILD_ENV += PATH="$(CUDA_HOME)/bin:$(PATH)"
@@ -132,7 +131,7 @@ FEDORA_PACKAGES := \
 	qt6-qtbase-devel \
 	qt6-qtdeclarative-devel
 
-.PHONY: native-deps windows-native-deps windows-build windows-run .windows-build-bash windows-check windows-release windows-package qt-native-deps qt-desktop-file desktop-icon cuda-target-check cuda-artifacts dev dev-mac qt-build dev-qt dev-server docs docs-check run run-qt build release check components-check gtk-components-showcase qt-components-showcase server-python-check manim manim-python-check manim-parameter-check cargo-check fmt fmt-check lint test frame-rate-test video-lifecycle-test transparent-fill-frame-range-test transparent-fill-decoder-test transparent-fill-kernel-test transparent-fill-compositor-test transparent-fill-playback-test transparent-fill-e2e-fixture transparent-fill-e2e-test decode-ahead-benchmark paint-interpolation-test process-reporting-test crash-report clean deps-fedora deps-fedora-qt qt-release install install-qt install-codex-mcp-dev install-agy-mcp-dev uninstall uninstall-qt flatpak-gtk
+.PHONY: native-deps windows-native-deps windows-build windows-run windows-check windows-release windows-package qt-native-deps qt-desktop-file desktop-icon cuda-target-check cuda-artifacts dev dev-mac qt-build dev-qt dev-server docs docs-check run run-qt build release check components-check gtk-components-showcase qt-components-showcase server-python-check manim manim-python-check manim-parameter-check cargo-check fmt fmt-check lint test frame-rate-test video-lifecycle-test transparent-fill-frame-range-test transparent-fill-decoder-test transparent-fill-kernel-test transparent-fill-compositor-test transparent-fill-playback-test transparent-fill-e2e-fixture transparent-fill-e2e-test decode-ahead-benchmark paint-interpolation-test process-reporting-test crash-report clean deps-fedora deps-fedora-qt qt-release install install-qt install-codex-mcp-dev install-agy-mcp-dev uninstall uninstall-qt flatpak-gtk
 native-deps:
 	@$(PKG_CONFIG) --exists rubberband || { echo "Missing Rubber Band development files (pkg-config: rubberband)" >&2; exit 1; }
 	@$(PKG_CONFIG) --exists libpipewire-0.3 || { echo "Missing PipeWire development files (pkg-config: libpipewire-0.3)" >&2; exit 1; }
@@ -311,8 +310,10 @@ check:
 endif
 
 ifeq ($(HOST_OS),Windows_NT)
-windows-build:
-	powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$$bash = '$(WINDOWS_BASH)'; if (!(Test-Path -LiteralPath $$bash)) { throw 'Git for Windows Bash not found. Set WINDOWS_BASH to Git\bin\bash.exe.' }; $$vswhere = Join-Path $${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'; if (!(Test-Path -LiteralPath $$vswhere)) { throw 'vswhere.exe not found. Install Visual Studio Build Tools or Visual Studio with C++ tools.' }; $$vs = & $$vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath; if (!$$vs) { throw 'No Visual Studio C++ toolchain found.' }; $$devcmd = Join-Path $$vs 'Common7\Tools\VsDevCmd.bat'; if (!(Test-Path -LiteralPath $$devcmd)) { throw 'VsDevCmd.bat not found.' }; $$quote = [char]34; $$cmd = 'call ' + $$quote + $$devcmd + $$quote + ' -arch=x64 -host_arch=x64 >nul && ' + $$quote + $$bash + $$quote + ' -c ' + $$quote + 'CL="$$(command -v cl.exe)"; MSVC_BIN="$${CL%/cl.exe}"; export PATH="$$MSVC_BIN:$$PATH"; $(MAKE) .windows-build-bash' + $$quote; cmd.exe /d /s /c $$cmd; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }"
+windows-build: override CUDA_IMAGE_FORMAT = ptx
+windows-build: override CUDA_PTX_TARGET = compute_75
+windows-build: windows-native-deps cuda-artifacts
+	$(BUILD_ENV) QMAKE="$(QT_QMAKE)" CARGO_TERM_COLOR=always $(CARGO) build -p $(QT_EDITOR_PACKAGE) -p $(QT_LAUNCHER_PACKAGE) --bins
 
 windows-run: windows-build
 	powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$$env:RUST_LOG = '$(RUST_LOG)'; & 'target/debug/$(QT_BIN_NAME).exe'; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }"
@@ -321,11 +322,6 @@ windows-build windows-run:
 	@echo "$@ requires Windows; current host: $(HOST_OS)" >&2
 	@exit 1
 endif
-
-.windows-build-bash: override CUDA_IMAGE_FORMAT = ptx
-.windows-build-bash: override CUDA_PTX_TARGET = compute_75
-.windows-build-bash: windows-native-deps cuda-artifacts
-	$(BUILD_ENV) QMAKE="$(QT_QMAKE)" CARGO_TERM_COLOR=always $(CARGO) build -p $(QT_EDITOR_PACKAGE) -p $(QT_LAUNCHER_PACKAGE) --bins
 
 windows-check: override CUDA_IMAGE_FORMAT = ptx
 windows-check: override CUDA_PTX_TARGET = compute_75
