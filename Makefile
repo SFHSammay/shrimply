@@ -316,7 +316,7 @@ windows-build: windows-native-deps cuda-artifacts
 	$(BUILD_ENV) QMAKE="$(QT_QMAKE)" CARGO_TERM_COLOR=always $(CARGO) build -p $(QT_EDITOR_PACKAGE) -p $(QT_LAUNCHER_PACKAGE) --bins
 
 windows-run: windows-build
-	powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$$env:RUST_LOG = '$(RUST_LOG)'; & 'target/debug/$(QT_BIN_NAME).exe'; if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE }"
+	$(BUILD_ENV) RUST_LOG="$(RUST_LOG)" target/debug/$(QT_BIN_NAME).exe
 else
 windows-build windows-run:
 	@echo "$@ requires Windows; current host: $(HOST_OS)" >&2
