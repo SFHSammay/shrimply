@@ -18,9 +18,15 @@ pub(super) struct PlaybackWindow {
 
 pub(super) type SharedPlaybackWindow = Arc<RwLock<Arc<PlaybackWindow>>>;
 
+pub(super) struct PlaybackFailure {
+    pub(super) message: String,
+    pub(super) requested: bool,
+}
+
 #[derive(Clone)]
 pub(super) struct OutputState {
     pub(super) window: SharedPlaybackWindow,
+    pub(super) requested: Arc<AtomicBool>,
     pub(super) playing: Arc<AtomicBool>,
     pub(super) previewing: Arc<AtomicBool>,
     pub(super) cursor_frame: Arc<AtomicU64>,
@@ -28,7 +34,7 @@ pub(super) struct OutputState {
     pub(super) duration_frames: Arc<AtomicU64>,
     pub(super) output_channels: usize,
     pub(super) levels: SharedAudioLevels,
-    pub(super) failure: Arc<Mutex<Option<String>>>,
+    pub(super) failure: Arc<Mutex<Option<PlaybackFailure>>>,
     pub(super) recoverable_error_log: Arc<Mutex<Option<Instant>>>,
 }
 
@@ -203,6 +209,9 @@ fn playback_window(output_state: &OutputState) -> Arc<PlaybackWindow> {
 }
 
 fn next_frame(output_state: &OutputState, window: &PlaybackWindow) -> (f32, f32) {
+    if !output_state.requested.load(Ordering::SeqCst) {
+        return (0.0, 0.0);
+    }
     let playing = output_state.playing.load(Ordering::SeqCst);
     let previewing = output_state.previewing.load(Ordering::SeqCst);
     if !playing && !previewing {
@@ -212,11 +221,13 @@ fn next_frame(output_state: &OutputState, window: &PlaybackWindow) -> (f32, f32)
     let frame = output_state.cursor_frame.load(Ordering::SeqCst);
     let duration_frames = output_state.duration_frames.load(Ordering::SeqCst);
     if frame >= duration_frames {
+        output_state.requested.store(false, Ordering::SeqCst);
         output_state.playing.store(false, Ordering::SeqCst);
         output_state.previewing.store(false, Ordering::SeqCst);
         return (0.0, 0.0);
     }
     if !playing && frame >= output_state.preview_end_frame.load(Ordering::SeqCst) {
+        output_state.requested.store(false, Ordering::SeqCst);
         output_state.previewing.store(false, Ordering::SeqCst);
         return (0.0, 0.0);
     }
@@ -258,12 +269,17 @@ fn handle_output_error(error: cpal::Error, output_state: &OutputState) {
         }
         return;
     }
-    let message = format!("Audio output failed: {error}");
+    fail_output(format!("Audio output failed: {error}"), output_state);
+}
+
+pub(super) fn fail_output(message: String, output_state: &OutputState) {
     tracing::error!("{message}");
+    let mut failure = output_state
+        .failure
+        .lock()
+        .expect("audio failure lock poisoned");
+    let requested = output_state.requested.swap(false, Ordering::SeqCst);
     output_state.playing.store(false, Ordering::SeqCst);
     output_state.previewing.store(false, Ordering::SeqCst);
-    match output_state.failure.lock() {
-        Ok(mut failure) => *failure = Some(message),
-        Err(error) => *error.into_inner() = Some(message),
-    }
+    failure.get_or_insert(PlaybackFailure { message, requested });
 }

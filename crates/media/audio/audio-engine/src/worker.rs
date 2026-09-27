@@ -1,8 +1,8 @@
 use hashbrown::HashMap;
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use shrimply_project_document::project::{
     Project, default_playback_speed, fraction_denominator, fraction_numerator,
 };
 
-use super::output::{PlaybackWindow, SharedPlaybackWindow};
+use super::output::{self, OutputState, PlaybackWindow};
 use super::streaming::{self, AudioRenderSession, AudioSourceKey};
 
 const CHUNK_MS: u64 = 80;
@@ -53,38 +53,12 @@ struct WorkerState {
     playback_speed: Fraction,
 }
 
-struct WorkerShared {
-    window: SharedPlaybackWindow,
-    playing: Arc<AtomicBool>,
-    previewing: Arc<AtomicBool>,
-    cursor_frame: Arc<AtomicU64>,
-    preview_end_frame: Arc<AtomicU64>,
-    duration_frames: Arc<AtomicU64>,
-    failure: Arc<Mutex<Option<String>>>,
-}
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn(
     project: Project,
     sample_rate: u32,
-    window: SharedPlaybackWindow,
-    playing: Arc<AtomicBool>,
-    previewing: Arc<AtomicBool>,
-    cursor_frame: Arc<AtomicU64>,
-    preview_end_frame: Arc<AtomicU64>,
-    duration_frames: Arc<AtomicU64>,
-    failure: Arc<Mutex<Option<String>>>,
+    shared: OutputState,
 ) -> (Sender<AudioCommand>, JoinHandle<()>) {
     let (command_tx, command_rx) = mpsc::channel();
-    let shared = WorkerShared {
-        window,
-        playing,
-        previewing,
-        cursor_frame,
-        preview_end_frame,
-        duration_frames,
-        failure,
-    };
     let worker = thread::spawn(move || worker_loop(project, sample_rate, shared, command_rx));
     (command_tx, worker)
 }
@@ -92,7 +66,7 @@ pub(super) fn spawn(
 fn worker_loop(
     project: Project,
     sample_rate: u32,
-    shared: WorkerShared,
+    shared: OutputState,
     command_rx: Receiver<AudioCommand>,
 ) {
     let mut state = WorkerState {
@@ -150,7 +124,7 @@ fn worker_loop(
     }
 }
 
-fn handle_command(command: AudioCommand, state: &mut WorkerState, shared: &WorkerShared) -> bool {
+fn handle_command(command: AudioCommand, state: &mut WorkerState, shared: &OutputState) -> bool {
     match command {
         AudioCommand::SetProject(project) => {
             state.project = *project;
@@ -196,8 +170,6 @@ fn handle_command(command: AudioCommand, state: &mut WorkerState, shared: &Worke
             false
         }
         AudioCommand::PlayFrom { frame } => {
-            shared.playing.store(true, Ordering::SeqCst);
-            shared.previewing.store(false, Ordering::SeqCst);
             clear_window(state, shared);
             state.mode = FillMode::Play {
                 next_output_frame: frame,
@@ -206,8 +178,6 @@ fn handle_command(command: AudioCommand, state: &mut WorkerState, shared: &Worke
             false
         }
         AudioCommand::Preview { frame, frames } => {
-            shared.playing.store(false, Ordering::SeqCst);
-            shared.previewing.store(false, Ordering::SeqCst);
             clear_window(state, shared);
             state.mode = FillMode::Preview { frame, frames };
             false
@@ -222,7 +192,7 @@ fn handle_command(command: AudioCommand, state: &mut WorkerState, shared: &Worke
 
 fn fill_preview(
     state: &mut WorkerState,
-    shared: &WorkerShared,
+    shared: &OutputState,
     frame: u64,
     frames: usize,
 ) -> Result<(), String> {
@@ -250,7 +220,7 @@ fn fill_preview(
 
 fn fill_play(
     state: &mut WorkerState,
-    shared: &WorkerShared,
+    shared: &OutputState,
     next_output_frame: u64,
     next_timeline_frame: u64,
     command_rx: &Receiver<AudioCommand>,
@@ -343,7 +313,7 @@ fn mix_playback_range(
     .unwrap_or(fallback))
 }
 
-fn clear_window(state: &mut WorkerState, shared: &WorkerShared) {
+fn clear_window(state: &mut WorkerState, shared: &OutputState) {
     state.generation = state.generation.wrapping_add(1);
     let mut next = PlaybackWindow::new();
     next.clear(state.generation);
@@ -353,7 +323,7 @@ fn clear_window(state: &mut WorkerState, shared: &WorkerShared) {
     }
 }
 
-fn store_chunk(state: &WorkerState, shared: &WorkerShared, start_frame: u64, samples: Vec<f32>) {
+fn store_chunk(state: &WorkerState, shared: &OutputState, start_frame: u64, samples: Vec<f32>) {
     let cursor = shared.cursor_frame.load(Ordering::SeqCst);
     let keep_before = cursor.saturating_sub(frames_for_ms(state.sample_rate, LOOKBEHIND_MS) as u64);
     let max_frames = frames_for_ms(state.sample_rate, MAX_WINDOW_MS);
@@ -375,16 +345,10 @@ fn store_chunk(state: &WorkerState, shared: &WorkerShared, start_frame: u64, sam
     }
 }
 
-fn fail_playback(state: &mut WorkerState, shared: &WorkerShared, error: String) {
+fn fail_playback(state: &mut WorkerState, shared: &OutputState, error: String) {
     let message = format!("Audio rendering failed: {error}");
-    tracing::error!("{message}");
-    shared.playing.store(false, Ordering::SeqCst);
-    shared.previewing.store(false, Ordering::SeqCst);
+    output::fail_output(message, shared);
     state.mode = FillMode::Idle;
-    match shared.failure.lock() {
-        Ok(mut failure) => *failure = Some(message),
-        Err(error) => *error.into_inner() = Some(message),
-    }
 }
 
 fn frames_for_ms(sample_rate: u32, milliseconds: u64) -> usize {

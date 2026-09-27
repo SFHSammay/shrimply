@@ -1,11 +1,9 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread;
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use shrimply_math_core::Fraction;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use shrimply_project_document::project::{Project, Time};
 
 pub use shrimply_project_document::project;
@@ -21,16 +19,16 @@ mod opus_cache;
 mod output;
 pub mod pneuma;
 pub mod recording;
+mod runtime;
 pub mod streaming;
 pub mod waveform;
 mod worker;
 
-use output::{OutputState, PlaybackWindow};
+use runtime::AudioRuntime;
 use worker::AudioCommand;
 
 const CHANNELS: usize = 2;
 const SCRUB_PREVIEW_MS: u64 = 120;
-const OUTPUT_PERIOD_MS: u32 = 40;
 
 #[derive(Default)]
 pub struct AudioLevels {
@@ -57,222 +55,191 @@ impl AudioLevels {
 }
 
 pub struct AudioPlayer {
-    _stream: cpal::Stream,
-    command_tx: Sender<AudioCommand>,
-    worker: Mutex<Option<thread::JoinHandle<()>>>,
-    stopped: AtomicBool,
-    playing: Arc<AtomicBool>,
-    previewing: Arc<AtomicBool>,
-    cursor_frame: Arc<AtomicU64>,
-    preview_end_frame: Arc<AtomicU64>,
-    duration_frames: Arc<AtomicU64>,
-    sample_rate: u32,
-    failure: Arc<Mutex<Option<String>>>,
+    state: RefCell<PlayerState>,
+    levels: SharedAudioLevels,
 }
 
-impl AudioPlayer {
-    pub fn new(project: &Project, levels: SharedAudioLevels) -> Result<Self, String> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| "No default audio output device".to_string())?;
-        let default_config = device
-            .default_output_config()
-            .map_err(|error| error.to_string())?;
-        let output_config = device
-            .supported_output_configs()
-            .map_err(|error| error.to_string())?
-            .find(|range| {
-                range.channels() == default_config.channels()
-                    && range.sample_format() == default_config.sample_format()
-                    && range.min_sample_rate() <= 48_000
-                    && range.max_sample_rate() >= 48_000
-            })
-            .map(|range| range.with_sample_rate(48_000))
-            .unwrap_or(default_config);
-        let mut config = output_config.config();
-        if let cpal::SupportedBufferSize::Range { min, max } = *output_config.buffer_size() {
-            let period_frames = config
-                .sample_rate
-                .saturating_mul(OUTPUT_PERIOD_MS)
-                .div_ceil(1_000)
-                .clamp(min, max);
-            config.buffer_size = cpal::BufferSize::Fixed(period_frames);
-        }
-        let output_channels = config.channels as usize;
-        let sample_rate = config.sample_rate;
-        tracing::info!(
-            "Building streaming audio output: device={}, sample_format={:?}, sample_rate={}, channels={}, buffer_size={:?}",
-            device,
-            output_config.sample_format(),
-            sample_rate,
-            output_channels,
-            config.buffer_size,
-        );
+struct PlayerState {
+    project: Project,
+    position: Time,
+    playback_speed: Fraction,
+    runtime: Option<AudioRuntime>,
+    failure: Option<String>,
+    stopped: bool,
+}
 
-        let window = Arc::new(RwLock::new(Arc::new(PlaybackWindow::new())));
-        let playing = Arc::new(AtomicBool::new(false));
-        let previewing = Arc::new(AtomicBool::new(false));
-        let cursor_frame = Arc::new(AtomicU64::new(0));
-        let preview_end_frame = Arc::new(AtomicU64::new(0));
-        let duration_frames = Arc::new(AtomicU64::new(
-            project.duration().as_sample_frame(sample_rate),
-        ));
-        let failure = Arc::new(Mutex::new(None));
-        let recoverable_error_log = Arc::new(Mutex::new(None));
-        let output_state = OutputState {
-            window: window.clone(),
-            playing: playing.clone(),
-            previewing: previewing.clone(),
-            cursor_frame: cursor_frame.clone(),
-            preview_end_frame: preview_end_frame.clone(),
-            duration_frames: duration_frames.clone(),
-            output_channels,
-            levels,
-            failure: failure.clone(),
-            recoverable_error_log,
-        };
-        let stream = output::build_stream(
-            &device,
-            &config,
-            output_config.sample_format(),
-            output_state,
-        )?;
-        let (command_tx, worker) = worker::spawn(
-            project.clone(),
-            sample_rate,
-            window,
-            playing.clone(),
-            previewing.clone(),
-            cursor_frame.clone(),
-            preview_end_frame.clone(),
-            duration_frames.clone(),
-            failure.clone(),
-        );
-        stream.play().map_err(|error| error.to_string())?;
-        tracing::info!("Streaming audio output ready");
-
-        Ok(Self {
-            _stream: stream,
-            command_tx,
-            worker: Mutex::new(Some(worker)),
-            stopped: AtomicBool::new(false),
-            playing,
-            previewing,
-            cursor_frame,
-            preview_end_frame,
-            duration_frames,
-            sample_rate,
-            failure,
-        })
-    }
-
-    pub fn set_project(&self, project: &Project) {
-        tracing::trace!("Updating streaming audio timeline");
-        self.duration_frames.store(
-            project.duration().as_sample_frame(self.sample_rate),
-            Ordering::SeqCst,
-        );
-        self.send(AudioCommand::SetProject(Box::new(project.clone())));
-    }
-
-    pub fn seek(&self, position: Time) {
-        let frame = position
-            .as_sample_frame(self.sample_rate)
-            .min(self.duration_frames.load(Ordering::SeqCst));
-        tracing::trace!(
-            "Streaming audio seek to {} (frame {frame})",
-            position.as_label()
-        );
-        self.cursor_frame.store(frame, Ordering::SeqCst);
-        self.previewing.store(false, Ordering::SeqCst);
-        self.send(AudioCommand::Seek { frame });
-    }
-
-    pub fn preview_from(&self, position: Time) {
-        let frame = position
-            .as_sample_frame(self.sample_rate)
-            .min(self.duration_frames.load(Ordering::SeqCst));
-        let preview_frames = self.sample_rate as u64 * SCRUB_PREVIEW_MS / 1_000;
-        let end_frame = frame
-            .saturating_add(preview_frames)
-            .min(self.duration_frames.load(Ordering::SeqCst));
-        if frame >= end_frame {
-            return;
-        }
-
-        tracing::trace!(
-            "Streaming audio scrub preview from {} (frames {frame}..{end_frame})",
-            position.as_label()
-        );
-        self.cursor_frame.store(frame, Ordering::SeqCst);
-        self.preview_end_frame.store(end_frame, Ordering::SeqCst);
-        self.previewing.store(false, Ordering::SeqCst);
-        self.send(AudioCommand::Preview {
-            frame,
-            frames: end_frame.saturating_sub(frame) as usize,
+impl PlayerState {
+    fn collect_failure(&mut self) {
+        let failure = self.runtime.as_ref().and_then(|runtime| {
+            runtime
+                .output
+                .failure
+                .lock()
+                .expect("audio failure lock poisoned")
+                .take()
         });
-    }
-
-    pub fn set_playback_speed(&self, playback_speed: Fraction) {
-        self.send(AudioCommand::SetPlaybackSpeed(playback_speed));
-    }
-
-    pub fn set_playing(&self, playing: bool) {
-        tracing::trace!("Streaming audio set playing={playing}");
-        if playing {
-            self.previewing.store(false, Ordering::SeqCst);
-            self.playing.store(true, Ordering::SeqCst);
-            self.send(AudioCommand::PlayFrom {
-                frame: self.cursor_frame.load(Ordering::SeqCst),
-            });
-        } else {
-            self.playing.store(false, Ordering::SeqCst);
-            self.previewing.store(false, Ordering::SeqCst);
-            self.send(AudioCommand::Pause);
-        }
-    }
-
-    pub fn stop(&self) {
-        if self.stopped.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        tracing::debug!("Stopping streaming audio output");
-        self.playing.store(false, Ordering::SeqCst);
-        self.previewing.store(false, Ordering::SeqCst);
-        self.send(AudioCommand::Stop);
-        let worker = match self.worker.lock() {
-            Ok(mut worker) => worker.take(),
-            Err(error) => error.into_inner().take(),
-        };
-        if let Some(worker) = worker
-            && worker.join().is_err()
-        {
-            let error = "streaming audio worker panicked during shutdown".to_string();
-            tracing::error!(%error);
-            match self.failure.lock() {
-                Ok(mut failure) => *failure = Some(error),
-                Err(poisoned) => *poisoned.into_inner() = Some(error),
+        if let Some(failure) = failure {
+            let runtime = self.runtime.as_ref().expect("failed audio runtime exists");
+            self.position = shrimply_math_core::time_from_sample_frame(
+                runtime.output.cursor_frame.load(Ordering::SeqCst),
+                runtime.sample_rate,
+            );
+            self.runtime = None;
+            if failure.requested {
+                self.failure.get_or_insert(failure.message);
             }
         }
     }
 
-    pub fn take_failure(&self) -> Option<String> {
-        match self.failure.lock() {
-            Ok(mut failure) => failure.take(),
-            Err(error) => error.into_inner().take(),
+    fn runtime(&mut self, levels: &SharedAudioLevels) -> Option<&AudioRuntime> {
+        self.collect_failure();
+        if self.stopped || self.failure.is_some() {
+            return None;
         }
-    }
-
-    fn send(&self, command: AudioCommand) {
-        if let Err(error) = self.command_tx.send(command) {
-            tracing::warn!("Could not send streaming audio command: {error}");
+        if self.runtime.is_none() {
+            match AudioRuntime::new(&self.project, levels.clone()) {
+                Ok(runtime) => {
+                    let frame = self
+                        .position
+                        .as_sample_frame(runtime.sample_rate)
+                        .min(runtime.output.duration_frames.load(Ordering::SeqCst));
+                    runtime.output.cursor_frame.store(frame, Ordering::SeqCst);
+                    runtime.send(AudioCommand::SetPlaybackSpeed(self.playback_speed));
+                    self.runtime = Some(runtime);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "Could not initialize audio playback");
+                    self.failure = Some(error);
+                    return None;
+                }
+            }
         }
+        self.runtime.as_ref()
     }
 }
 
-impl Drop for AudioPlayer {
-    fn drop(&mut self) {
-        self.stop();
+impl AudioPlayer {
+    pub fn new(project: &Project, levels: SharedAudioLevels) -> Result<Self, String> {
+        Ok(Self {
+            state: RefCell::new(PlayerState {
+                project: project.clone(),
+                position: Time::ZERO,
+                playback_speed: project::default_playback_speed(),
+                runtime: None,
+                failure: None,
+                stopped: false,
+            }),
+            levels,
+        })
+    }
+
+    pub fn set_project(&self, project: &Project) {
+        let mut state = self.state.borrow_mut();
+        state.project = project.clone();
+        if let Some(runtime) = &state.runtime {
+            runtime.output.duration_frames.store(
+                project.duration().as_sample_frame(runtime.sample_rate),
+                Ordering::SeqCst,
+            );
+            runtime.send(AudioCommand::SetProject(Box::new(project.clone())));
+        }
+    }
+
+    pub fn seek(&self, position: Time) {
+        let mut state = self.state.borrow_mut();
+        state.position = position;
+        if let Some(runtime) = &state.runtime {
+            let frame = position
+                .as_sample_frame(runtime.sample_rate)
+                .min(runtime.output.duration_frames.load(Ordering::SeqCst));
+            runtime.output.cursor_frame.store(frame, Ordering::SeqCst);
+            runtime.output.previewing.store(false, Ordering::SeqCst);
+            runtime.output.requested.store(
+                runtime.output.playing.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
+            runtime.send(AudioCommand::Seek { frame });
+        }
+    }
+
+    pub fn preview_from(&self, position: Time) {
+        let mut state = self.state.borrow_mut();
+        state.position = position;
+        if position >= state.project.duration() {
+            return;
+        }
+        let Some(runtime) = state.runtime(&self.levels) else {
+            return;
+        };
+        let frame = position
+            .as_sample_frame(runtime.sample_rate)
+            .min(runtime.output.duration_frames.load(Ordering::SeqCst));
+        let preview_frames = runtime.sample_rate as u64 * SCRUB_PREVIEW_MS / 1_000;
+        let end_frame = frame
+            .saturating_add(preview_frames)
+            .min(runtime.output.duration_frames.load(Ordering::SeqCst));
+        if frame >= end_frame {
+            runtime.output.requested.store(false, Ordering::SeqCst);
+            return;
+        }
+        runtime.output.cursor_frame.store(frame, Ordering::SeqCst);
+        runtime
+            .output
+            .preview_end_frame
+            .store(end_frame, Ordering::SeqCst);
+        runtime.output.playing.store(false, Ordering::SeqCst);
+        runtime.output.previewing.store(false, Ordering::SeqCst);
+        runtime.output.requested.store(true, Ordering::SeqCst);
+        runtime.send(AudioCommand::Preview {
+            frame,
+            frames: end_frame.saturating_sub(frame) as usize,
+        });
+        runtime.start_output();
+    }
+
+    pub fn set_playback_speed(&self, playback_speed: Fraction) {
+        let mut state = self.state.borrow_mut();
+        state.playback_speed = playback_speed;
+        if let Some(runtime) = &state.runtime {
+            runtime.send(AudioCommand::SetPlaybackSpeed(playback_speed));
+        }
+    }
+
+    pub fn set_playing(&self, playing: bool) {
+        let mut state = self.state.borrow_mut();
+        if playing {
+            let Some(runtime) = state.runtime(&self.levels) else {
+                return;
+            };
+            runtime.output.previewing.store(false, Ordering::SeqCst);
+            runtime.output.requested.store(true, Ordering::SeqCst);
+            runtime.output.playing.store(true, Ordering::SeqCst);
+            runtime.send(AudioCommand::PlayFrom {
+                frame: runtime.output.cursor_frame.load(Ordering::SeqCst),
+            });
+            runtime.start_output();
+        } else if let Some(runtime) = &state.runtime {
+            runtime.output.requested.store(false, Ordering::SeqCst);
+            runtime.output.playing.store(false, Ordering::SeqCst);
+            runtime.output.previewing.store(false, Ordering::SeqCst);
+            let position = shrimply_math_core::time_from_sample_frame(
+                runtime.output.cursor_frame.load(Ordering::SeqCst),
+                runtime.sample_rate,
+            );
+            runtime.send(AudioCommand::Pause);
+            state.position = position;
+        }
+    }
+
+    pub fn stop(&self) {
+        let mut state = self.state.borrow_mut();
+        state.stopped = true;
+        state.runtime = None;
+    }
+
+    pub fn take_failure(&self) -> Option<String> {
+        let mut state = self.state.borrow_mut();
+        state.collect_failure();
+        state.failure.take()
     }
 }
