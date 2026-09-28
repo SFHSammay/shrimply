@@ -11,6 +11,19 @@ CUDA_IMAGE_FORMAT ?= cubin
 CUDA_PTX_TARGET ?= compute_50
 CUDA_HOST_CXX ?= g++-15
 CUDA_ALLOW_UNSUPPORTED_COMPILER ?=
+ifeq ($(HOST_OS),Linux)
+CUDA_DEV_TARGETS := dev dev-qt run run-qt build qt-build
+else ifeq ($(HOST_OS),Windows_NT)
+CUDA_DEV_TARGETS := windows-build windows-dev
+endif
+ifneq ($(filter $(CUDA_DEV_TARGETS),$(MAKECMDGOALS)),)
+CUDA_NATIVE_TARGET := $(shell uv run --no-project python packaging/cuda-target.py)
+ifeq ($(strip $(CUDA_NATIVE_TARGET)),)
+$(error Could not detect the local CUDA architecture for the development build)
+endif
+$(CUDA_DEV_TARGETS): override CUDA_IMAGE_FORMAT = cubin
+$(CUDA_DEV_TARGETS): override CUDA_TARGET := $(CUDA_NATIVE_TARGET)
+endif
 SOURCE_LINE_LIMIT ?= 2000
 OPTIX_ROOT ?= $(CURDIR)/external/optix-dev
 DNF ?= sudo dnf
@@ -30,7 +43,7 @@ DEV_RUSTFLAGS ?=
 else
 DEV_RUSTFLAGS ?= -C prefer-dynamic -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-rpath,$(RUST_LIBDIR)
 endif
-DEV_BUILD_ENV := $(BUILD_ENV) RUSTFLAGS="$(DEV_RUSTFLAGS)"
+DEV_BUILD_ENV = $(BUILD_ENV) RUSTFLAGS="$(DEV_RUSTFLAGS)"
 
 APP_NAME := Shrimply
 BIN_NAME := shrimply
@@ -131,7 +144,7 @@ FEDORA_PACKAGES := \
 	qt6-qtbase-devel \
 	qt6-qtdeclarative-devel
 
-.PHONY: native-deps windows-native-deps windows-build windows-run windows-check windows-release windows-package qt-native-deps qt-desktop-file desktop-icon cuda-target-check cuda-artifacts dev dev-mac qt-build dev-qt dev-server docs docs-check run run-qt build release check components-check gtk-components-showcase qt-components-showcase server-python-check manim manim-python-check manim-parameter-check cargo-check fmt fmt-check lint test frame-rate-test video-lifecycle-test transparent-fill-frame-range-test transparent-fill-decoder-test transparent-fill-kernel-test transparent-fill-compositor-test transparent-fill-playback-test transparent-fill-e2e-fixture transparent-fill-e2e-test decode-ahead-benchmark paint-interpolation-test process-reporting-test crash-report clean deps-fedora deps-fedora-qt qt-release install install-qt install-codex-mcp-dev install-agy-mcp-dev uninstall uninstall-qt flatpak-gtk
+.PHONY: native-deps windows-native-deps windows-build windows-dev windows-check windows-release windows-package qt-native-deps qt-desktop-file desktop-icon cuda-target-check cuda-artifacts dev dev-mac qt-build dev-qt dev-server docs docs-check run run-qt build release check components-check gtk-components-showcase qt-components-showcase server-python-check manim manim-python-check manim-parameter-check cargo-check fmt fmt-check lint test frame-rate-test video-lifecycle-test transparent-fill-frame-range-test transparent-fill-decoder-test transparent-fill-kernel-test transparent-fill-compositor-test transparent-fill-playback-test transparent-fill-e2e-fixture transparent-fill-e2e-test decode-ahead-benchmark paint-interpolation-test process-reporting-test crash-report clean deps-fedora deps-fedora-qt qt-release install install-qt install-codex-mcp-dev install-agy-mcp-dev uninstall uninstall-qt flatpak-gtk
 native-deps:
 	@$(PKG_CONFIG) --exists rubberband || { echo "Missing Rubber Band development files (pkg-config: rubberband)" >&2; exit 1; }
 	@$(PKG_CONFIG) --exists libpipewire-0.3 || { echo "Missing PipeWire development files (pkg-config: libpipewire-0.3)" >&2; exit 1; }
@@ -310,15 +323,13 @@ check:
 endif
 
 ifeq ($(HOST_OS),Windows_NT)
-windows-build: override CUDA_IMAGE_FORMAT = ptx
-windows-build: override CUDA_PTX_TARGET = compute_75
 windows-build: windows-native-deps cuda-artifacts
 	$(BUILD_ENV) QMAKE="$(QT_QMAKE)" CARGO_TERM_COLOR=always $(CARGO) build -p $(QT_EDITOR_PACKAGE) -p $(QT_LAUNCHER_PACKAGE) --bins
 
-windows-run: windows-build
+windows-dev: windows-build
 	$(BUILD_ENV) RUST_LOG="$(RUST_LOG)" target/debug/$(QT_BIN_NAME).exe
 else
-windows-build windows-run:
+windows-build windows-dev:
 	@echo "$@ requires Windows; current host: $(HOST_OS)" >&2
 	@exit 1
 endif
