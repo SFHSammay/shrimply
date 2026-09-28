@@ -571,18 +571,23 @@ impl GpuMemoryManager {
                 "allocate {description} as managed memory: {result:?}"
             ));
         }
-        let mut buffer = unsafe { DeviceBuffer::from_raw_parts(ptr, length, stream.context().clone()) };
+        let buffer = unsafe { DeviceBuffer::from_raw_parts(ptr, length, stream.context().clone()) };
         #[cfg(target_os = "windows")]
-        {
+        let buffer = {
+            // Windows forbids CPU access to managed memory while GPU work is active.
+            let mut buffer = buffer;
             buffer
                 .zero_async(stream)
                 .map_err(|error| format!("zero {description} managed memory: {error}"))?;
             stream
                 .synchronize()
                 .map_err(|error| format!("finish zeroing {description} managed memory: {error}"))?;
-        }
+            buffer
+        };
         #[cfg(not(target_os = "windows"))]
-        unsafe { std::ptr::write_bytes(ptr as *mut u8, 0, bytes as usize) };
+        unsafe {
+            std::ptr::write_bytes(ptr as *mut u8, 0, bytes as usize)
+        };
         let ptr = buffer.cu_deviceptr();
         let location = if prefer_host {
             ManagedLocation::Host

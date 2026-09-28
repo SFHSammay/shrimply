@@ -278,7 +278,7 @@ where
             .add_stream_with(video_encoder.as_ref())
             .map_err(|error| error.to_string())?;
         if settings.container == ExportContainer::Mp4
-            && stream.parameters().id() == ffmpeg::codec::Id::HEVC
+            && settings.video_codec == ExportVideoCodec::H265
         {
             // FFmpeg defaults to `hev1`; `hvc1` is required for reliable QuickTime playback.
             unsafe {

@@ -584,7 +584,7 @@ impl VideoWriter {
         let (fps_numerator, fps_denominator) = fps_parts_i32(fps)?;
         let time_base = ffmpeg::Rational(fps_denominator, fps_numerator);
         let frame_rate = ffmpeg::Rational(fps_numerator, fps_denominator);
-        let encoder = open_recording_encoder(width, height, time_base, frame_rate, global_header)?;
+        let encoder = open_hevc_encoder(width, height, time_base, frame_rate, global_header)?;
         let stream_index = {
             let mut stream = output
                 .add_stream_with(encoder.as_ref())
@@ -745,100 +745,15 @@ fn screen_scaler(
     .map_err(|error| error.to_string())
 }
 
-#[derive(Clone, Copy)]
-enum RecordingEncoder {
-    HevcNvenc,
-    H264Nvenc,
-    LibX264,
-}
-
-impl RecordingEncoder {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::HevcNvenc => "hevc_nvenc",
-            Self::H264Nvenc => "h264_nvenc",
-            Self::LibX264 => "libx264",
-        }
-    }
-
-    fn options(self) -> ffmpeg::Dictionary<'static> {
-        let mut options = ffmpeg::Dictionary::new();
-        match self {
-            Self::HevcNvenc => {
-                options.set("preset", "p3");
-                options.set("tune", "ll");
-                options.set("profile", "main");
-                options.set("rc", "constqp");
-                options.set("qp", NVENC_CONSTANT_QP);
-                options.set("bf", &NVENC_B_FRAMES.to_string());
-                options.set("spatial-aq", "1");
-                options.set("temporal-aq", "0");
-                options.set("zerolatency", "1");
-                options.set("delay", "0");
-            }
-            Self::H264Nvenc => {
-                options.set("preset", "p3");
-                options.set("tune", "ll");
-                options.set("rc", "constqp");
-                options.set("qp", NVENC_CONSTANT_QP);
-                options.set("bf", &NVENC_B_FRAMES.to_string());
-                options.set("spatial-aq", "1");
-                options.set("temporal-aq", "0");
-                options.set("zerolatency", "1");
-                options.set("delay", "0");
-            }
-            Self::LibX264 => {
-                options.set("preset", "veryfast");
-                options.set("tune", "zerolatency");
-                options.set("crf", "23");
-            }
-        }
-        options
-    }
-}
-
-fn open_recording_encoder(
+fn open_hevc_encoder(
     width: u32,
     height: u32,
     time_base: ffmpeg::Rational,
     frame_rate: ffmpeg::Rational,
     global_header: bool,
 ) -> Result<ffmpeg::codec::encoder::video::Encoder, String> {
-    let mut errors = Vec::new();
-    for candidate in [
-        RecordingEncoder::HevcNvenc,
-        RecordingEncoder::H264Nvenc,
-        RecordingEncoder::LibX264,
-    ] {
-        match open_recording_encoder_candidate(
-            candidate,
-            width,
-            height,
-            time_base,
-            frame_rate,
-            global_header,
-        ) {
-            Ok(encoder) => return Ok(encoder),
-            Err(error) => errors.push(error),
-        }
-    }
-    Err(format!(
-        "Could not open a screen recording encoder:\n{}",
-        errors.join("\n")
-    ))
-}
-
-fn open_recording_encoder_candidate(
-    candidate: RecordingEncoder,
-    width: u32,
-    height: u32,
-    time_base: ffmpeg::Rational,
-    frame_rate: ffmpeg::Rational,
-    global_header: bool,
-) -> Result<ffmpeg::codec::encoder::video::Encoder, String> {
-    let name = candidate.name();
-    let codec = ffmpeg::codec::encoder::find_by_name(name)
-        .ok_or_else(|| format!("FFmpeg encoder {name} was not found"))?;
+    let codec = ffmpeg::codec::encoder::find_by_name("hevc_nvenc")
+        .ok_or("FFmpeg encoder hevc_nvenc was not found")?;
     let mut encoder = ffmpeg::codec::Context::new_with_codec(codec)
         .encoder()
         .video()
@@ -860,9 +775,20 @@ fn open_recording_encoder_candidate(
             (*encoder.as_mut_ptr()).flags |= ffmpeg::sys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
         }
     }
+    let mut options = ffmpeg::Dictionary::new();
+    options.set("preset", "p3");
+    options.set("tune", "ll");
+    options.set("profile", "main");
+    options.set("rc", "constqp");
+    options.set("qp", NVENC_CONSTANT_QP);
+    options.set("bf", &NVENC_B_FRAMES.to_string());
+    options.set("spatial-aq", "1");
+    options.set("temporal-aq", "0");
+    options.set("zerolatency", "1");
+    options.set("delay", "0");
     encoder
-        .open_as_with(codec, candidate.options())
-        .map_err(|error| format!("Could not open {name}: {error}"))
+        .open_as_with(codec, options)
+        .map_err(|error| format!("Could not open hevc_nvenc: {error}"))
 }
 
 fn fps_parts_i32(fps: Fraction) -> Result<(i32, i32), String> {

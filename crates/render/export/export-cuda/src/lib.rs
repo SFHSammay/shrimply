@@ -8,7 +8,6 @@ use std::{
 };
 
 use ffmpeg::format::Pixel;
-use ffmpeg::software::scaling;
 use ffmpeg::sys;
 use ffmpeg_next as ffmpeg;
 use shrimply_export_core::video::{self as core, FrameTiming, RenderedFrame, VideoBackend};
@@ -129,9 +128,6 @@ struct CudaBackend {
     settings: ExportSettings,
     renderer: Option<VideoExportRenderer>,
     hardware_frames: Option<HwFrameContext>,
-    encoder_mode: Option<EncoderMode>,
-    actual_encoder: Option<&'static str>,
-    software_scaler: Option<scaling::Context>,
 }
 
 impl CudaBackend {
@@ -140,9 +136,6 @@ impl CudaBackend {
             settings,
             renderer: None,
             hardware_frames: None,
-            encoder_mode: None,
-            actual_encoder: None,
-            software_scaler: None,
         }
     }
 
@@ -172,22 +165,17 @@ impl CudaBackend {
     }
 }
 
-enum EncoderMode {
-    Hardware,
-    Software,
-}
-
 impl VideoBackend for CudaBackend {
     fn name(&self) -> &'static str {
         "cuda"
     }
 
     fn encoder_label(&self, codec: ExportVideoCodec) -> &'static str {
-        self.actual_encoder.unwrap_or(match codec {
+        match codec {
             ExportVideoCodec::H264 => "h264_nvenc",
             ExportVideoCodec::H265 => "hevc_nvenc",
             ExportVideoCodec::Gif => "gif",
-        })
+        }
     }
 
     fn validate(&self, project: &Project, settings: &core::ExportSettings) -> Result<(), String> {
@@ -218,7 +206,9 @@ impl VideoBackend for CudaBackend {
                 gpu_host_memory_gib: self.settings.gpu_host_memory_gib,
             },
         )?);
-        let _ = project;
+        if settings.video_codec != ExportVideoCodec::Gif {
+            self.hardware_frames = Some(HwFrameContext::new(project, &self.settings)?);
+        }
         Ok(())
     }
 
@@ -228,102 +218,11 @@ impl VideoBackend for CudaBackend {
         settings: &core::ExportSettings,
         global_header: bool,
     ) -> Result<ffmpeg::codec::encoder::video::Encoder, String> {
+        let hardware_frames = self
+            .hardware_frames
+            .as_ref()
+            .ok_or("NVENC export requires CUDA hardware frames")?;
         let encoder_name = self.encoder_label(settings.video_codec);
-        match self.open_nvenc_encoder(project, settings, global_header, encoder_name) {
-            Ok((encoder, hardware_frames)) => {
-                self.hardware_frames = Some(hardware_frames);
-                self.encoder_mode = Some(EncoderMode::Hardware);
-                self.actual_encoder = Some(encoder_name);
-                Ok(encoder)
-            }
-            Err(nvenc_error) => {
-                #[cfg(not(windows))]
-                return Err(nvenc_error);
-
-                #[cfg(windows)]
-                {
-                    if settings.video_codec != ExportVideoCodec::H264 {
-                        return Err(nvenc_error);
-                    }
-                    let encoder_name = "libx264";
-                    let Some(codec) = ffmpeg::codec::encoder::find_by_name(encoder_name) else {
-                        return Err(format!(
-                            "{}; FFmpeg encoder {} was not found",
-                            nvenc_error,
-                            encoder_name
-                        ));
-                    };
-                    let encoder = open_software_encoder(
-                        project,
-                        settings,
-                        global_header,
-                        codec,
-                        encoder_name,
-                    )
-                    .map_err(|software_error| format!("{nvenc_error}; {software_error}"))?;
-                    self.hardware_frames = None;
-                    self.encoder_mode = Some(EncoderMode::Software);
-                    self.actual_encoder = Some(encoder_name);
-                    Ok(encoder)
-                }
-            }
-        }
-    }
-
-    fn render_video_frame(
-        &mut self,
-        project: &Project,
-        _settings: &core::ExportSettings,
-        position: Time,
-        cancelled: &AtomicBool,
-    ) -> Result<RenderedFrame, String> {
-        match self
-            .encoder_mode
-            .as_ref()
-            .ok_or("CUDA export encoder mode was not prepared")?
-        {
-            EncoderMode::Hardware => self.render_hardware_video_frame(project, position, cancelled),
-            EncoderMode::Software => self.render_software_video_frame(project, position, cancelled),
-        }
-    }
-
-    fn render_rgba_frame(
-        &mut self,
-        project: &Project,
-        _settings: &core::ExportSettings,
-        position: Time,
-        cancelled: &AtomicBool,
-    ) -> Result<RenderedFrame, String> {
-        let (frame, timing) = self.rgba_frame(project, position, cancelled)?;
-        Ok(RenderedFrame {
-            frame,
-            timing,
-        })
-    }
-
-    fn decoder_session_count(&self) -> Option<usize> {
-        self.renderer
-            .as_ref()
-            .map(VideoExportRenderer::decoder_session_count)
-    }
-
-    fn shutdown(&mut self) {
-        if let Some(mut renderer) = self.renderer.take() {
-            renderer.shutdown();
-            std::mem::forget(renderer);
-        }
-    }
-}
-
-impl CudaBackend {
-    fn open_nvenc_encoder(
-        &self,
-        project: &Project,
-        settings: &core::ExportSettings,
-        global_header: bool,
-        encoder_name: &'static str,
-    ) -> Result<(ffmpeg::codec::encoder::video::Encoder, HwFrameContext), String> {
-        let hardware_frames = HwFrameContext::new(project, &self.settings)?;
         let codec = ffmpeg::codec::encoder::find_by_name(encoder_name)
             .ok_or_else(|| format!("FFmpeg encoder {encoder_name} was not found"))?;
         let mut encoder = ffmpeg::codec::Context::new_with_codec(codec)
@@ -349,15 +248,15 @@ impl CudaBackend {
                 (*context).flags |= sys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
             }
         }
-        let encoder = encoder
+        encoder
             .open_as_with(codec, video_options(&self.settings))
-            .map_err(|error| format!("Could not open {encoder_name}: {error}"))?;
-        Ok((encoder, hardware_frames))
+            .map_err(|error| format!("Could not open {encoder_name}: {error}"))
     }
 
-    fn render_hardware_video_frame(
+    fn render_video_frame(
         &mut self,
         project: &Project,
+        _settings: &core::ExportSettings,
         position: Time,
         cancelled: &AtomicBool,
     ) -> Result<RenderedFrame, String> {
@@ -382,44 +281,13 @@ impl CudaBackend {
         })
     }
 
-    fn render_software_video_frame(
+    fn render_rgba_frame(
         &mut self,
         project: &Project,
+        _settings: &core::ExportSettings,
         position: Time,
         cancelled: &AtomicBool,
     ) -> Result<RenderedFrame, String> {
-        let (rgba, timing) = self.rgba_frame(project, position, cancelled)?;
-        let mut frame =
-            ffmpeg::frame::Video::new(Pixel::YUV420P, project.canvas_size.width, project.canvas_size.height);
-        if self.software_scaler.is_none() {
-            self.software_scaler = Some(
-                scaling::Context::get(
-                    Pixel::RGBA,
-                    project.canvas_size.width,
-                    project.canvas_size.height,
-                    Pixel::YUV420P,
-                    project.canvas_size.width,
-                    project.canvas_size.height,
-                    scaling::Flags::BILINEAR,
-                )
-                .map_err(|error| error.to_string())?,
-            );
-        }
-        self.software_scaler
-            .as_mut()
-            .expect("software export scaler initialized")
-            .run(&rgba, &mut frame)
-            .map_err(|error| error.to_string())?;
-        set_bt709_frame_metadata(&mut frame);
-        Ok(RenderedFrame { frame, timing })
-    }
-
-    fn rgba_frame(
-        &mut self,
-        project: &Project,
-        position: Time,
-        cancelled: &AtomicBool,
-    ) -> Result<(ffmpeg::frame::Video, FrameTiming), String> {
         let composited = self.render(project, position, cancelled)?;
         let mut frame = ffmpeg::frame::Video::new(
             Pixel::RGBA,
@@ -431,47 +299,27 @@ impl CudaBackend {
             .as_mut()
             .expect("renderer was checked while rendering")
             .copy_to_rgba_frame(composited, &mut frame)?;
-        Ok((
+        Ok(RenderedFrame {
             frame,
-            FrameTiming {
+            timing: FrameTiming {
                 compositor_ns: Some(timing.compositor_ns),
                 conversion_ns: Some(timing.conversion_ns),
             },
-        ))
+        })
     }
-}
 
-fn open_software_encoder(
-    project: &Project,
-    settings: &core::ExportSettings,
-    global_header: bool,
-    codec: ffmpeg::Codec,
-    encoder_name: &'static str,
-) -> Result<ffmpeg::codec::encoder::video::Encoder, String> {
-    let mut encoder = ffmpeg::codec::Context::new_with_codec(codec)
-        .encoder()
-        .video()
-        .map_err(|error| error.to_string())?;
-    encoder.set_width(project.canvas_size.width.max(1));
-    encoder.set_height(project.canvas_size.height.max(1));
-    encoder.set_time_base(video_time_base(settings.fps)?);
-    encoder.set_frame_rate(Some(video_frame_rate(settings.fps)?));
-    encoder.set_gop(video_gop(settings));
-    encoder.set_max_b_frames(settings.b_frames as usize);
-    encoder.set_format(Pixel::YUV420P);
-    unsafe {
-        set_bt709_video_metadata(encoder.as_mut_ptr());
-        if global_header {
-            (*encoder.as_mut_ptr()).flags |= sys::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
+    fn decoder_session_count(&self) -> Option<usize> {
+        self.renderer
+            .as_ref()
+            .map(VideoExportRenderer::decoder_session_count)
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(mut renderer) = self.renderer.take() {
+            renderer.shutdown();
+            std::mem::forget(renderer);
         }
     }
-    let mut options = ffmpeg::Dictionary::new();
-    options.set("preset", "veryfast");
-    options.set("tune", "zerolatency");
-    options.set("crf", "23");
-    encoder
-        .open_as_with(codec, options)
-        .map_err(|error| format!("Could not open {encoder_name}: {error}"))
 }
 
 fn video_options(settings: &ExportSettings) -> ffmpeg::Dictionary<'static> {
